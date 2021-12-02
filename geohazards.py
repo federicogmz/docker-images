@@ -36,7 +36,6 @@ def Shalstab(dem_path, acc_path, geo_path, hmin, hmax, c, phy, k, gammas, q, sta
 
     #Converts slope from degrees to radians
     slope_rad = np.radians(slope_array)
-    slope_array[slope_array == 0] = 1e-15
 
     #Calculates zs from Catani
     zs = Catani(dem_path, geo_path, hmin=hmin, hmax=hmax).read(1)
@@ -105,7 +104,7 @@ def Catani(dem_path, geo_path, hmin, hmax, output='zs.tif'):
 
     #Imports dem and opens it with rasterio
     dem = rasterio.open(dem_path)
-
+    global slope
     #Calculates slope
     slope = calculate_slope(dem_path)
     slope_array = slope.read(1)
@@ -117,11 +116,14 @@ def Catani(dem_path, geo_path, hmin, hmax, output='zs.tif'):
     slope_rad = np.radians(slope_array)
 
     #Rasterize minimum and maximum soil thickness in area from geology
-    hmax = rasterize(dem_path, geo_path, attribute=hmax).read(1)
+    if isinstance(hmax,float) or isinstance(hmax,int):
+        hmax = hmax
+    else:
+        hmax = rasterize(dem_path, geo_path, attribute=hmax).read(1)
     if isinstance(hmin,float) or isinstance(hmin,int):
         hmin = hmin
     else:
-        hmin = rasterize(dem_path, geo_path, attribute=hmin).read(1)
+        hmax = rasterize(dem_path, geo_path, attribute=hmin).read(1)
 
     #Calculates variables with Tangent
     tan_slope = np.tan(slope_rad)
@@ -160,11 +162,11 @@ def rasterize(raster, polygon, attribute):
         shapes = ((geom,value) for geom, value in zip(poly.geometry, poly[attribute]))
 
         #Rasterize each polygon with the value of interest
-        burned = features.rasterize(shapes=shapes, fill=0, out=out_arr, transform=out.transform)
+        burned = features.rasterize(shapes=shapes, fill=-9999, out=out_arr, transform=out.transform)
 
         #Exports raster output file
         out.write_band(1, burned)
-    
+
     #Reads back rasterio file
     raster = rasterio.open('rasterized.tif')
 
