@@ -96,7 +96,7 @@ def Shalstab(dem_path, acc_path, geo_path, hmin, hmax, c, phy, k, gammas, q, sta
     #Returns soil thickness rasterio file
     return st, qc
 
-def Catani(dem_path, geo_path, hmin, hmax, output='zs.tif'):
+def Catani(dem_path, geo_path, hmin, hmax, output='./zs.tif'):
 
     """
     Function to get soil thickness from model S Catani et. al (2010)
@@ -104,7 +104,7 @@ def Catani(dem_path, geo_path, hmin, hmax, output='zs.tif'):
 
     #Imports dem and opens it with rasterio
     dem = rasterio.open(dem_path)
-    global slope
+
     #Calculates slope
     slope = calculate_slope(dem_path)
     slope_array = slope.read(1)
@@ -140,6 +140,80 @@ def Catani(dem_path, geo_path, hmin, hmax, output='zs.tif'):
     #Exports raster output file and assign metadata
     with rasterio.open(output, 'w+', **meta) as out:
         out.write_band(1, catani)
+    
+    #Returns soil thickness rasterio file
+    return rasterio.open(output)
+
+def Topog(dem_path, acc_path, geo_path, zs_path, q, ks='ks', output='./zw.tif'):
+
+    #Imports dem and opens it with rasterio
+    dem = rasterio.open(dem_path)
+    b = dem.res[0]
+
+    #Calculates slope
+    slope = calculate_slope(dem_path)
+    slope_array = slope.read(1)
+
+    #Sets no data to np.nan
+    slope_array[slope_array == slope.nodata] = np.nan
+
+    #Converts slope from degrees to radians
+    slope_rad = np.radians(slope_array)
+
+    acc_ = rasterio.open(acc_path)
+    zs = rasterio.open(zs_path)
+
+    #Rasterize ks from geology
+    if isinstance(ks,float) or isinstance(ks,int):
+        ks = ks
+    else:
+        ks = rasterize(dem_path, geo_path, attribute='ks').read(1)
+
+    zw_ = q*(acc_/b)*ks*zs*np.cos(slope_rad)*np.sin(slope_rad)
+    zw = np.where(zw_>=zs, zs, zw_)
+
+    #Copies metadata from dem
+    meta = dem.meta.copy()
+    meta.update(compress='lzw', nodata=-9999)
+
+    #Exports raster output file and assign metadata
+    with rasterio.open(output, 'w+', **meta) as out:
+        out.write_band(1, zw)
+    
+    #Returns soil thickness rasterio file
+    return rasterio.open(output)
+
+def FS(dem_path, geo_path, zw_path, c, phi, gammas, output='./FS.tif'):
+
+    dem = rasterio.open(dem_path)
+    zw = rasterio.open(zw_path)
+
+    #Calculates slope
+    slope = calculate_slope(dem_path)
+    slope_array = slope.read(1)
+
+    #Sets no data to np.nan
+    slope_array[slope_array == slope.nodata] = np.nan
+
+    #Converts slope from degrees to radians
+    slope_rad = np.radians(slope_array)
+
+    gammaw = 9.81
+
+    C = rasterize(dem_path, geo_path, attribute=c).read(1)
+    phi = rasterize(dem_path, geo_path, attribute=phi).read(1)
+    gammas = rasterize(dem_path, geo_path, attribute=c).read(1)
+
+
+    FS = C + (gammas - gammaw) * zw * (np.cos(slope_rad)**2) * np.tan(phi) / gammas * zw * np.sin(slope_rad) * np.cos(slope_rad)
+
+    #Copies metadata from dem
+    meta = dem.meta.copy()
+    meta.update(compress='lzw', nodata=-9999)
+
+    #Exports raster output file and assign metadata
+    with rasterio.open(output, 'w+', **meta) as out:
+        out.write_band(1, FS)
     
     #Returns soil thickness rasterio file
     return rasterio.open(output)
