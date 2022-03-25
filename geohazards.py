@@ -270,7 +270,7 @@ def calculate_slope(dem_path):
     slope = rasterio.open('slope.tif', **meta)
     
     #Removes raster from system
-    os.remove('slope.tif')
+    #os.remove('slope.tif')
     
     #Returns rasterio file
     return slope
