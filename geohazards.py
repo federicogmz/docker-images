@@ -104,7 +104,7 @@ def Catani(dem_path, geo_path, hmin, hmax, output='zs.tif'):
 
     #Imports dem and opens it with rasterio
     dem = rasterio.open(dem_path)
-    global slope
+
     #Calculates slope
     slope = calculate_slope(dem_path)
     slope_array = slope.read(1)
@@ -196,7 +196,7 @@ def calculate_slope(dem_path):
     slope = rasterio.open('slope.tif', **meta)
     
     #Removes raster from system
-    os.remove('slope.tif')
+    #os.remove('slope.tif')
     
     #Returns rasterio file
     return slope
