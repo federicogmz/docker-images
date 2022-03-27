@@ -1,32 +1,39 @@
 #%%
-import rasterio
-from geohazards import Catani, plot_rasterio, Shalstab
+from geohazards import Shalstab
 import geopandas as gpd
+import os
+import rioxarray
+from geocube.api.core import make_geocube
 
-#%%
 path=r'G:\Unidades compartidas\Proyectos(Fede)\Tarso\Amenaza\TRIGRS'
 dem_path = f'{path}/dem.tif'
 acc_path = f'{path}/aacum.tif'
 geo_path = r'G:\Unidades compartidas\Proyectos(Fede)\Tarso\Amenaza\insumos/UndGeol25.shp'
-
-hmin = 'hmin'
-hmax = 'hmax'
-c = 'C_kPa'
-phy = 'Phi_grad'
-k = 'k_cmh'
-gammas = 'Gamma_knm3'
+slope_path = f'{path}/slope.tif'
+#%%
 q = 71.67
 
+s = Shalstab(dem_path, acc_path, q, stability='./Str5.tif', qcrit='./qcrit.tif', rm_zs=True, rm_qcrit=True)
+
 #%%
-dem = rasterio.open(dem_path)
-plot_rasterio(dem)
+os.remove('slope.tif')
+os.remove('Str5.tif')
+os.remove('qcrit.tif')
 
-#%% CATANI
-geo_path='/asd'
 
-zs = Catani(dem_path, geo_path, 0.1, 3, f'{path}/zs.tif')
+#%%
+from geohazards import Catani
+zs = Catani(dem_path, slope_path, 0.1, 3)
 
-plot_rasterio(zs)
-# %% SHALSTAB
 
-Shalstab(dem_path, acc_path, geo_path, hmin, hmax, c, phy, k, gammas, q, stability='./Str5.tif', qcrit='./qcrit.tif', rm_zs=True, rm_qcrit=True)
+#%%
+
+dem = rioxarray.open_rasterio(dem_path, masked=True)
+gdf = gpd.read_file(geo_path)
+
+out_grid = make_geocube(
+    vector_data = gdf,
+    resolution = dem.rio.resolution(),
+    fill = -9999,
+    output_crs = dem.rio.crs
+)
