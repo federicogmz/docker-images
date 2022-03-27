@@ -102,7 +102,11 @@ def Shalstab(dem_path, acc_path, q, geo_path, stability='./stability.tif', qcrit
     #Returns soil thickness rasterio file
     return st, qc
 
+<<<<<<< HEAD
 def Catani(dem_path, slope_path, hmin, hmax):
+=======
+def Catani(dem_path, geo_path, hmin, hmax, output='./zs.tif'):
+>>>>>>> f9e63241bfb0740cec33daa399a95adb3a2bb100
 
     """
     Function to get soil thickness from model S Catani et. al (2010)
@@ -127,4 +131,166 @@ def Catani(dem_path, slope_path, hmin, hmax):
     catani = hmax * (1 - ( (tan_slope - tan_slope_min) / (tan_slope_max - tan_slope_min) ) * (1 - (hmin / hmax)) )
 
     #Returns soil thickness rasterio file
+<<<<<<< HEAD
     return catani
+=======
+    return rasterio.open(output)
+
+def Topog(dem_path, acc_path, geo_path, zs_path, q, ks='ks', output='./zw.tif'):
+
+    #Imports dem and opens it with rasterio
+    dem = rasterio.open(dem_path)
+    b = dem.res[0]
+
+    #Calculates slope
+    slope = calculate_slope(dem_path)
+    slope_array = slope.read(1)
+
+    #Sets no data to np.nan
+    slope_array[slope_array == slope.nodata] = np.nan
+
+    #Converts slope from degrees to radians
+    slope_rad = np.radians(slope_array)
+
+    acc_ = rasterio.open(acc_path)
+    zs = rasterio.open(zs_path)
+
+    #Rasterize ks from geology
+    if isinstance(ks,float) or isinstance(ks,int):
+        ks = ks
+    else:
+        ks = rasterize(dem_path, geo_path, attribute='ks').read(1)
+
+    zw_ = q*(acc_/b)*ks*zs*np.cos(slope_rad)*np.sin(slope_rad)
+    zw = np.where(zw_>=zs, zs, zw_)
+
+    #Copies metadata from dem
+    meta = dem.meta.copy()
+    meta.update(compress='lzw', nodata=-9999)
+
+    #Exports raster output file and assign metadata
+    with rasterio.open(output, 'w+', **meta) as out:
+        out.write_band(1, zw)
+    
+    #Returns soil thickness rasterio file
+    return rasterio.open(output)
+
+def FS(dem_path, geo_path, zw_path, c, phi, gammas, output='./FS.tif'):
+
+    dem = rasterio.open(dem_path)
+    zw = rasterio.open(zw_path)
+
+    #Calculates slope
+    slope = calculate_slope(dem_path)
+    slope_array = slope.read(1)
+
+    #Sets no data to np.nan
+    slope_array[slope_array == slope.nodata] = np.nan
+
+    #Converts slope from degrees to radians
+    slope_rad = np.radians(slope_array)
+
+    gammaw = 9.81
+
+    C = rasterize(dem_path, geo_path, attribute=c).read(1)
+    phi = rasterize(dem_path, geo_path, attribute=phi).read(1)
+    gammas = rasterize(dem_path, geo_path, attribute=c).read(1)
+
+
+    FS = C + (gammas - gammaw) * zw * (np.cos(slope_rad)**2) * np.tan(phi) / gammas * zw * np.sin(slope_rad) * np.cos(slope_rad)
+
+    #Copies metadata from dem
+    meta = dem.meta.copy()
+    meta.update(compress='lzw', nodata=-9999)
+
+    #Exports raster output file and assign metadata
+    with rasterio.open(output, 'w+', **meta) as out:
+        out.write_band(1, FS)
+    
+    #Returns soil thickness rasterio file
+    return rasterio.open(output)
+
+def rasterize(raster, polygon, attribute):
+
+    #Imports raster and shapefile
+    poly = gpd.read_file(polygon)
+    rst = rasterio.open(raster)
+
+    #Copys metadata from raster
+    meta = rst.meta.copy()
+    meta.update(compress='lzw')
+
+    #Export raster output file and assign metadata
+    with rasterio.open('rasterized.tif', 'w+', **meta) as out:
+        out_arr = out.read(1)
+
+        #Iters from each polygon and extracts the value of interest
+        shapes = ((geom,value) for geom, value in zip(poly.geometry, poly[attribute]))
+
+        #Rasterize each polygon with the value of interest
+        burned = features.rasterize(shapes=shapes, fill=-9999, out=out_arr, transform=out.transform)
+
+        #Exports raster output file
+        out.write_band(1, burned)
+
+    #Reads back rasterio file
+    raster = rasterio.open('rasterized.tif')
+
+    #Removes raster from system
+    os.remove('rasterized.tif')
+
+    #Returns rasterio file
+    return raster
+
+def calculate_slope(dem_path):
+
+    """
+    Function to calculate slope from DEM
+    """
+
+    #Imports dem and opens it with rasterio
+    dem = rasterio.open(dem_path)
+    
+    #Calculates slope
+    gdal.DEMProcessing('slope.tif', dem_path, 'slope')
+    
+    #Copys metadata from raster
+    meta = dem.meta.copy()
+    meta.update(compress='lzw')
+    
+    #Exports slope output file
+    slope = rasterio.open('slope.tif', **meta)
+    
+    #Removes raster from system
+    #os.remove('slope.tif')
+    
+    #Returns rasterio file
+    return slope
+
+def plot_rasterio(rio_dataset):
+
+    """
+    Function to plot a rasterio raster with legend
+    """
+
+    #Creates plot
+    fig, ax = plt.subplots()
+
+    #Reads rasterio raster as np.array
+    array = rio_dataset.read(1)
+
+    #Sets no data to np.nan
+    array[array == rio_dataset.nodata] = np.nan
+
+    #Adds hidden plot for colorbar
+    image_hidden = ax.imshow(array)
+
+    #Adds the rasterio plot
+    show(rio_dataset, ax=ax)
+
+    #Adds the colorbar
+    fig.colorbar(image_hidden, ax=ax)
+
+    #Returns the plot
+    return plt.show()
+>>>>>>> f9e63241bfb0740cec33daa399a95adb3a2bb100
