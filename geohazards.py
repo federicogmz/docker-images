@@ -102,11 +102,7 @@ def Shalstab(dem_path, acc_path, q, geo_path, stability='./stability.tif', qcrit
     #Returns soil thickness rasterio file
     return st, qc
 
-<<<<<<< HEAD
 def Catani(dem_path, slope_path, hmin, hmax):
-=======
-def Catani(dem_path, geo_path, hmin, hmax, output='./zs.tif'):
->>>>>>> f9e63241bfb0740cec33daa399a95adb3a2bb100
 
     """
     Function to get soil thickness from model S Catani et. al (2010)
@@ -131,10 +127,7 @@ def Catani(dem_path, geo_path, hmin, hmax, output='./zs.tif'):
     catani = hmax * (1 - ( (tan_slope - tan_slope_min) / (tan_slope_max - tan_slope_min) ) * (1 - (hmin / hmax)) )
 
     #Returns soil thickness rasterio file
-<<<<<<< HEAD
     return catani
-=======
-    return rasterio.open(output)
 
 def Topog(dem_path, acc_path, geo_path, zs_path, q, ks='ks', output='./zw.tif'):
 
@@ -293,4 +286,3 @@ def plot_rasterio(rio_dataset):
 
     #Returns the plot
     return plt.show()
->>>>>>> f9e63241bfb0740cec33daa399a95adb3a2bb100

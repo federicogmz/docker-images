@@ -1,0 +1,96 @@
+Name of project (up to 255 characters)
+Trigrs
+imax, row, col, nwf, tx, nmax
+ 666426,1492,1449,1274511,  1,  30
+nzs, mmax, nper,  zmin,  uww,     t, zones
+10,    200,   1,   0.001,  9.8e+3,14400,9
+zmax,   depth,   rizero,  Min_Slope_Angle (degrees)
+-3,-3,  1e-8,       0
+zone,1
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+15000,32,17350.0,6.220000000000001e-05,6.22e-07,-0.23,-0.48,-0.06
+zone,2
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+15000,32,17350.0,6.220000000000001e-05,6.22e-07,-0.23,-0.48,-0.06
+zone,3
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+11000,17,16700.0,5.05e-06,5.05e-08,-0.23,-0.48,-0.06
+zone,4
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+16000,29,16700.0,0.000126,1.26e-06,-0.23,-0.48,-0.06
+zone,5
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+7000,23,17350.0,6.220000000000001e-05,6.22e-07,-0.23,-0.48,-0.06
+zone,6
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+7000,23,17350.0,6.220000000000001e-05,6.22e-07,-0.23,-0.48,-0.06
+zone,7
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+7000,23,17350.0,6.220000000000001e-05,6.22e-07,-0.23,-0.48,-0.06
+zone,8
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+20000,32,19250.0,1e-06,1e-08,-0.23,-0.48,-0.06
+zone,9
+cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha
+10000,27,19250.0,1.47e-05,1.47e-07,-0.23,-0.48,-0.06
+cri(1), cri(2), ...,14400
+3.6333333333333334e-06
+capt(1), capt(2), ..., capt(n), capt(n+1)
+0,14400
+File name of slope angle grid (slofil)  
+slope.txt
+File name of property zone grid (zonfil)
+zonas.txt
+File name of depth grid (zfil) 
+zs.txt
+File name of initial depth of water table grid   (depfil)
+zs.txt
+File name of initial infiltration rate grid   (rizerofil)
+none
+List of file name(s) of rainfall intensity for each period, (rifil())  
+none
+File name of grid of D8 runoff receptor cell numbers (nxtfil)
+tpx\TIdscelGrid_mohan.txt
+File name of list of defining runoff computation order (ndxfil)
+tpx\TIcelindxList_mohan.txt
+File name of list of all runoff receptor cells  (dscfil)
+tpx\TIdscelList_mohan.txt
+File name of list of runoff weighting factors  (wffil)
+tpx\TIwfactorList_mohan.txt
+M500
+out\
+Identification code to be added to names of output files (suffix)
+M2
+Save grid files of runoff? Enter T (.true.) or F (.false.)
+F
+Save grid of minimum factor of safety? Enter Enter T (.true.) or F (.false.)
+T
+Save grid of depth of minimum factor of safety? Enter Enter T (.true.) or F (.false.)
+T
+Save grid of pore pressure at depth of minimum factor of safety? Enter Enter T (.true.) or F (.false.)
+F
+Save grid files of actual infiltration rate? Enter T (.true.) or F (.false.)
+F
+Save grid files of unsaturated zone basal flux? Enter T (.true.) or F (.false.)
+F
+Save listing of pressure head and factor of safety ("flag")? (Enter -2 detailed, -1 normal, 0 none)
+0
+14400
+1
+Times of output grids 
+14400
+Skip other timesteps? Enter T (.true.) or F (.false.)
+F
+Use analytic solution for fillable porosity?  Enter T (.true.) or F (.false.)
+T
+Estimate positive pressure head in rising water table zone (i.e. in lower part of unsat zone)?  Enter T (.true.) or F (.false.)
+T
+Use psi0=-1/alpha? Enter T (.true.) or F (.false.) (False selects the default value, psi0=0)
+T
+Log mass balance results?   Enter T (.true.) or F (.false.)
+T
+Flow direction (enter "gener", "slope", or "hydro")
+gener
+Add steady background flux to transient infiltration rate to prevent drying beyond the initial conditions during periods of zero infiltration?
+T
+
