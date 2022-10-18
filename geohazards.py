@@ -6,49 +6,41 @@ from rasterio.plot import show
 import geopandas as gpd
 from osgeo import gdal
 import rioxarray
+import xarray as xr
 from geocube.api.core import make_geocube
+import richdem as rd
 
 np.seterr(divide='ignore', invalid='ignore')
 
-def Shalstab(dem_path, acc_path, q, geo_path, stability='./stability.tif', qcrit='./qcrit.tif', rm_zs=False, rm_qcrit=False):
-
-    """
-    Function to get stability model and critical rainfall using SHALSTAB model from  Montgomery and Dietrich (1984)
-    """
+def SHALSTAB(demPath, geoPath, geoColumns, q, shalstabPath, criticalRainPath, exportShalstab, exportCriticalRain):
 
     #Imports rasters and opens them with rasterio
-    dem = rioxarray.open_rasterio(dem_path, masked=True)
-    acc_ = rioxarray.open_rasterio(acc_path, masked=True)
+    dem = rioxarray.open_rasterio(demPath, mask_and_scale=True)
 
-    gdf = gpd.read_file(geo_path)
+    dem_ = rd.LoadGDAL(demPath)
+    accum = rd.FlowAccumulation(dem_, method='D8')
+    accum = xr.DataArray(accum, coords=[dem.coords['y'],dem.coords['x']])
+
+    gdf = gpd.read_file(geoPath)
 
     #Rasterize from geology
-    parameters = make_geocube(
-        vector_data=gdf,
-        #measurements=["C_kPa"],
-        resolution=(-12.5, 12.5),
-        fill=-9999,
-        output_crs=dem.rio.crs
-    )
-    
+    c = make_geocube(vector_data=gdf, measurements = [geoColumns[0]], 
+                    like=dem, fill = np.nan)[geoColumns[0]]
+    p = make_geocube(vector_data=gdf, measurements = [geoColumns[1]], 
+                    like=dem, fill = np.nan)[geoColumns[1]]
+    p = np.radians(p)
+    g = make_geocube(vector_data=gdf, measurements = [geoColumns[2]], 
+                    like=dem, fill = np.nan)[geoColumns[2]]
+    k = make_geocube(vector_data=gdf, measurements = [geoColumns[3]], 
+                    like = dem, fill = np.nan)[geoColumns[3]]
+
     #Calculates slope
-    slope = calculate_slope(dem_path)
-    slope_array = slope.read(1)
-
-    #Sets no data to np.nan
-    slope_array[slope_array == slope.nodata] = np.nan
-
-    #Converts slope from degrees to radians
-    slope_rad = np.radians(slope_array)
-
-    zs = rasterio.open(r'G:\Unidades compartidas\Proyectos(Fede)\Tarso\Amenaza\TRIGRS\zs.asc').read(1)
+    slope = rd.TerrainAttribute(dem_, attrib='slope_radians')
+    slope = xr.DataArray(slope, coords=[dem.coords['y'],dem.coords['x']])
+    slope_rad = slope.where(slope!=-9999.)
 
     #Calculates zs from Catani
-    #zs = Catani(dem_path, geo_path, hmin=hmin, hmax=hmax).read(1)
-    #if rm_zs:
-    #    pass
-    #else:
-    #    os.remove('./zs.tif')
+    zs = Catani(demPath, geoPath, hmin=geoColumns[4], hmax=geoColumns[5])
 
     #Unit weight of water
     gammaw = 9.81
@@ -57,66 +49,98 @@ def Shalstab(dem_path, acc_path, q, geo_path, stability='./stability.tif', qcrit
     izq_un = np.tan(slope_rad)
 
     #Right from unstable condition
-    der_unstable = np.tan(friction_rad) + (cohesion / (gamma * zs * np.cos(slope_rad)**2))
+    der_unstable = np.tan(p) + (c / (g * zs * np.cos(slope_rad)**2))
 
     #Right from stable condition
-    der_stable = (1 - (gammaw/gamma)) * np.tan(friction_rad) + (cohesion / (gamma * zs * np.cos(slope_rad)**2))
+    der_stable = (1 - (gammaw/g)) * np.tan(p) + (c / (g * zs * np.cos(slope_rad)**2))
 
     #Left from main equation
-    izq = acc / dem.res[0]
+    izq = accum / dem.rio.resolution()[0]
 
     #Right from main equation
-    der = ((0.01 * k * (zs * np.cos(slope_rad)) * np.sin(slope_rad)) / (0.001*q)) * ((gamma / gammaw) * (1 - np.tan(slope_rad) / np.tan(friction_rad)) + (cohesion / (gammaw * zs * np.cos(slope_rad)**2 * np.tan(friction_rad)))) 
+    der = ((k * (zs * np.cos(slope_rad)) * np.sin(slope_rad)) / (q/1000)) * ((g / gammaw) * (1 - np.tan(slope_rad) / np.tan(p)) + (c / (gammaw * zs * np.cos(slope_rad)**2 * np.tan(p)))) 
 
     #Shalstab stability categories
-    shalstab = np.where(izq_un >= der_unstable, 2, np.where(izq_un < der_stable, 1, np.where(izq > der, 3, np.where(izq <= der, 4, 0))))
+    shalstab = np.where(izq_un >= der_unstable, 2, # Unconditionally unstable
+                np.where(izq_un < der_stable, 1, # Unconditionally stable
+                np.where(izq > der, 3, # Unstable
+                np.where(izq <= der, 4, np.nan)))) # Stable
+
+    shalstab = xr.DataArray(shalstab, coords=[dem.coords['y'],dem.coords['x']])
+    shalstab.rio.write_nodata(-9999, inplace=True)
+
+    if exportShalstab:
+        shalstab.rio.to_raster(shalstabPath)
 
     #Calculates critical rainfall
-    q_crit = (1000 * 0.01 * k * zs * np.cos(slope_rad) * np.sin(slope_rad)) * (dem.res[0] / acc) * ((gamma / gammaw) * (1 - (np.tan(slope_rad) / np.tan(friction_rad))) + cohesion / (gammaw * zs * np.cos(slope_rad)**2 * np.tan(friction_rad)))
-    q_crit[q_crit==np.inf] = np.nanmax(q_crit)
+    criticalRain = 1000 * (k * zs * np.cos(slope_rad) * np.sin(slope_rad)) * (dem.rio.resolution()[0] / accum) * ((g / gammaw) * (1 - (np.tan(slope_rad) / np.tan(p))) + c / (gammaw * zs * np.cos(slope_rad)**2 * np.tan(p)))
+    criticalRain = criticalRain.where(criticalRain>=0)
 
-    #Adds unconditional categories
-    q_crit = np.where(izq_un >= der_unstable, -2, np.where(izq_un < der_stable, -1, q_crit))
+    criticalRain = np.where(izq_un >= der_unstable, -2, 
+                np.where(izq_un < der_stable, -1, criticalRain))
+    criticalRain = xr.DataArray(criticalRain, coords=[dem.coords['y'],dem.coords['x']])
 
-    #Copys metadata from dem
-    meta = dem.meta.copy()
-    meta.update(compress='lzw', nodata=0)
+    criticalRain.rio.write_nodata(-9999, inplace=True)
 
-    #Exports raster output file and assign metadata
-    with rasterio.open(stability, 'w+', **meta) as out:
-        out.write_band(1, shalstab)
+    if exportCriticalRain:
+        criticalRain.rio.to_raster(criticalRainPath)
+    
+    totalCeldas = shalstab.to_series().sum()
 
-    meta.update(compress='lzw', nodata=-9999)
+    try: 
+        incondEstables = shalstab.to_series().value_counts()[1]
+    except:
+        incondEstables = 0
+    try:
+        incondInestables = shalstab.to_series().value_counts()[2]
+    except:
+        incondInestables = 0
+    try:
+        inestables = shalstab.to_series().value_counts()[3]
+    except:
+        inestables = 0
+    try:
+        estables = shalstab.to_series().value_counts()[4]
+    except:
+        estables = 0
 
-    with rasterio.open(qcrit, 'w+', **meta) as out:
-        out.write_band(1, q_crit)
+    stabilityReport = ''
 
-    st = rasterio.open(stability)
-    qc = rasterio.open(qcrit)
+    stabilityReport += f'Incondicionalmente estables: {incondEstables*100/totalCeldas:.2f}%\n'
+    stabilityReport += f'Incondicionalmente inestables: {incondInestables*100/totalCeldas:.2f}%\n'
+    stabilityReport += f'Inestables: {inestables*100/totalCeldas:.2f}%\n'
+    stabilityReport += f'Estables: {estables*100/totalCeldas:.2f}%'
 
-    if rm_qcrit:
-        pass
-    else:
-        os.remove(qcrit)
+    shalstab.attrs['Reporte'] = stabilityReport
 
-    #Returns soil thickness rasterio file
-    return st, qc
+    return shalstab, criticalRain
 
-def Catani(dem_path, slope_path, hmin, hmax):
+def Catani(demPath, geoPath, hmin=0.1, hmax=3.0):
 
     """
     Function to get soil thickness from model S Catani et. al (2010)
     """
 
     #Imports dem and opens it with rasterio
-    dem = rioxarray.open_rasterio(dem_path)
-    slope = rioxarray.open_rasterio(slope_path)
+    dem = rioxarray.open_rasterio(demPath, mask_and_scale=True)
+    dem_ = rd.LoadGDAL(demPath)
 
-    #Converts slope from degrees to radians
-    slope_rad = np.radians(slope)
+    slope = rd.TerrainAttribute(dem_, attrib='slope_radians')
+    slope = xr.DataArray(slope, coords=[dem.coords['y'],dem.coords['x']])
+    slope_rad = slope.where(slope!=-9999.)
 
-    hmax = hmax
-    hmin = hmin
+    gdf = gpd.read_file(geoPath)
+
+    if isinstance(hmin, str):
+        hmin = make_geocube(vector_data=gdf, measurements = [hmin], 
+                        like = dem, fill = np.nan)[hmin]
+    else: hmin = hmin
+
+    if isinstance(hmax, str):
+        hmax = make_geocube(vector_data=gdf, measurements = [hmax], 
+                        like = dem, fill = np.nan)[hmax]
+    else: 
+        hmax = hmax
 
     #Calculates variables with Tangent
     tan_slope = np.tan(slope_rad)
@@ -125,6 +149,8 @@ def Catani(dem_path, slope_path, hmin, hmax):
 
     #Calculates soil thickness
     catani = hmax * (1 - ( (tan_slope - tan_slope_min) / (tan_slope_max - tan_slope_min) ) * (1 - (hmin / hmax)) )
+
+    catani = xr.DataArray(catani, coords=[dem.coords['y'],dem.coords['x']])
 
     #Returns soil thickness rasterio file
     return catani
