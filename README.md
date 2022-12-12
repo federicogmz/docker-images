@@ -1,2 +1,5 @@
 # Geohazards
-New repo.
+Modelos disponibles:
+- Modelo S (Catani)
+- TRIGRS
+- SHALSTAB

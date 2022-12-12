@@ -150,7 +150,7 @@ def Catani(demPath, geoPath, hmin=0.1, hmax=3.0):
     #Calculates soil thickness
     catani = hmax * (1 - ( (tan_slope - tan_slope_min) / (tan_slope_max - tan_slope_min) ) * (1 - (hmin / hmax)) )
 
-    catani = xr.DataArray(catani, coords=[dem.coords['y'],dem.coords['x']])
+    catani = xr.DataArray(catani, coords=[dem.coords['y'], dem.coords['x']])
 
     #Returns soil thickness rasterio file
     return catani
