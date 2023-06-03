@@ -1,0 +1,14 @@
+# TRIGRS files
+.txt
+.asc
+
+# Shapefiles
+.cpg
+.dbf
+.prj
+.qmd
+.shp
+.shx
+
+# Rasters
+.tif

@@ -1,18 +1,42 @@
 #%%
+import whitebox
 import numpy as np
 import statistics, os
 import matplotlib.pyplot as plt 
 from matplotlib import colors
 import rasterio as rio
 import pandas as pd
+import xarray as xr
+from geohazards import geohazards, TRIGRS, SHALSTAB
+import matplotlib.pyplot as plt
+import rasterio
+from geocube.api.core import make_geocube
+import geopandas as gpd
+
+g = geohazards()
+
+# DEM
+geoPath = '/home/geohazards/TRIGRS/Geologia.shp'
+outPath = '/home/geohazards/TRIGRS'
+demPath = f'{outPath}/DemResample.tif'
+
+# t = TRIGRS()
+# t(demPath, geoPath, outPath)
+s = SHALSTAB(demPath, geoPath, 96, shalstabPath=f'{outPath}/Shalstab.tif', exportShalstab=True)
+shalstab, criticalRain = s()
+
+#%%
+import subprocess
+
+outPath = '/home/geohazards/TRIGRS'
 
 def TRIGRS(tr, i, hora, zonas, prefix, zmax, depth, export, FOSM):
 
     prefijo = f'{prefix}{tr}'
-    cri=(i)/(1000*3600) #Intensidad en m/s
-    capt_int=hora*3600 #Tiempo en s
+    cri = i / (1000 * 3600) # Intensidad en m/s
+    capt_int = hora * 3600 # Tiempo en s
 
-    TopoIndexLog=open('TopoIndexLog.txt', "r")
+    TopoIndexLog = open(f'{outPath}/TopoIndexLog.txt', "r")
     list_of_lines_tx = TopoIndexLog.readlines()
     list_of_lines_tx[-5].split('  ')
     imax=list_of_lines_tx[-5].split('  ')[1]
@@ -21,7 +45,7 @@ def TRIGRS(tr, i, hora, zonas, prefix, zmax, depth, export, FOSM):
     nwf=list_of_lines_tx[-5].split('  ')[4][:-1]
 
     #Para separar cada fila en una lista
-    tr_in_file = open('tr_in.txt', "r")
+    tr_in_file = open(f'{outPath}/tr_in.txt', "r")
     list_of_lines = tr_in_file.readlines()
 
     n=zonas
@@ -199,12 +223,13 @@ def TRIGRS(tr, i, hora, zonas, prefix, zmax, depth, export, FOSM):
     list_of_lines[38+(3*(n-1))]=f'{prefijo}\n'
 
     # Sobre escribir el archivo txt
-    a_file = open('tr_in.txt', "w")
+    a_file = open(f'{outPath}/tr_in.txt', "w")
     a_file.writelines(list_of_lines)
     a_file.close()
 
     # ejecutar trigrs
-    os.system('"'+"TRIGRS.exe"+'"')
+    os.chdir(outPath)
+    subprocess.run([f'{outPath}/TRIGRS.exe'])
 
     if FOSM:
             
@@ -226,41 +251,44 @@ def TRIGRS(tr, i, hora, zonas, prefix, zmax, depth, export, FOSM):
             list_of_lines[38+(3*(n-1))]=e
             
             # # Sobre escribir el archivo txt
-            a_file = open('tr_in.txt', "w")
+            a_file = open(f'{outPath}/tr_in.txt', "w")
             a_file.writelines(list_of_lines)
             a_file.close()
                 
             #ejecutar trigrs
-            os.system('"'+"TRIGRS.exe"+'"')
+            subprocess.run([f'{outPath}/TRIGRS.exe'])
 
+        if not os.path.exists(f'{outPath}/Resultados'):
+            os.makedirs(f'{outPath}/Resultados')
+            
         '''Val medio'''
-        FS_1_medio = np.genfromtxt(f'./Resultados/TRfs_min_{prefijo}_1.txt', skip_header=6, delimiter=' ')
+        FS_1_medio = np.genfromtxt(f'{outPath}/Resultados/TRfs_min_{prefijo}_1.txt', skip_header=6, delimiter=' ')
         FS_1_medio =np.where(FS_1_medio==-9999,np.nan,FS_1_medio)
         FS_1_medio =np.where(FS_1_medio==10,10,FS_1_medio)
 
         '''Cambio solo de la cohesion'''
-        FS_1_cohe = np.genfromtxt(f'./Resultados/TRfs_min_{prefijo}_C_1.txt', skip_header=6, delimiter=' ')
+        FS_1_cohe = np.genfromtxt(f'{outPath}/TRfs_min_{prefijo}_C_1.txt', skip_header=6, delimiter=' ')
         FS_1_cohe=np.where(FS_1_cohe==-9999,np.nan,FS_1_cohe)
         FS_1_cohe=np.where(FS_1_cohe>=9.8,10,FS_1_cohe)
 
         '''Cambio solo del ángulo de fricción'''
-        FS_1_phi = np.genfromtxt(f'./Resultados/TRfs_min_{prefijo}_Phi_1.txt', skip_header=6, delimiter=' ')
+        FS_1_phi = np.genfromtxt(f'{outPath}/TRfs_min_{prefijo}_Phi_1.txt', skip_header=6, delimiter=' ')
         FS_1_phi=np.where(FS_1_phi==-9999,np.nan,FS_1_phi)
         FS_1_phi=np.where(FS_1_phi>=9.8,10,FS_1_phi)
 
 
         '''Cambio solo del peso específico'''
-        FS_1_uws = np.genfromtxt(f'./Resultados/TRfs_min_{prefijo}_Uws_1.txt', skip_header=6, delimiter=' ')
+        FS_1_uws = np.genfromtxt(f'{outPath}/TRfs_min_{prefijo}_Uws_1.txt', skip_header=6, delimiter=' ')
         FS_1_uws=np.where(FS_1_uws==-9999,np.nan,FS_1_uws)
         FS_1_uws=np.where(FS_1_uws>=9.8,10,FS_1_uws)
 
         '''Cambio solo del KS'''
-        FS_1_ks = np.genfromtxt(f'./Resultados/TRfs_min_{prefijo}_Ks_1.txt', skip_header=6, delimiter=' ')
+        FS_1_ks = np.genfromtxt(f'{outPath}/TRfs_min_{prefijo}_Ks_1.txt', skip_header=6, delimiter=' ')
         FS_1_ks=np.where(FS_1_ks==-9999,np.nan,FS_1_ks)
         FS_1_ks=np.where(FS_1_ks>=9.8,10,FS_1_ks)
 
         '''Mapa de zonas'''
-        zonas = np.genfromtxt('zonas.asc', skip_header=6, delimiter=' ')
+        zonas = np.genfromtxt(f'{outPath}/zonas.asc', skip_header=6, delimiter=' ')
         zonas =np.where(zonas ==-9999,np.nan,zonas )
 
         '''FOSM'''
@@ -342,49 +370,68 @@ def TRIGRS(tr, i, hora, zonas, prefix, zmax, depth, export, FOSM):
 
         if export:
 
-            file=rio.open('fill.asc')
+            file=rio.open(f'{outPath}/dem.asc')
             raster=file.read(1)
 
             meta=file.profile
             file_transform = meta['transform']
             file_crs = meta['crs']
 
-            with rio.open(f'./Resultados/Ind_conf_{prefijo}.tif', 'w', 
+            with rio.open(f'{outPath}/Resultados/Ind_conf_{prefijo}.tif', 'w', 
                             driver='Gtiff',height=raster.shape[0],width=raster.shape[1],count=1,
                             dtype='float64',nodata=-999,crs=file_crs ,transform=file_transform ) as dst:
                 dst.write(Ind_conf_1,1)
-#%%
 
-os.chdir(r"G:\Unidades compartidas\Proyectos(Fede)\Tarso\Urbano\TRIGRS")
-trs = [2,233,5,10,25,50,100,300,500]
-ints = [13.080,14.015,17.107,19.766,23.153,25.561,28.058,32.409,34.344]
-zonas = 9
-hora = 4
-zmax = -3
-depth = -3
-
-#Valores medios
-for i,tr in zip(ints,trs):
-    TRIGRS(tr, i, hora, zonas, prefix='M', zmax=zmax, depth=depth, FOSM=False, export=False)
-
-#%%
-os.chdir("./Mohan/Codigo/")
-tr=2
-i=13.080
-zonas = 9
-hora = 4
-zmax = -3
-depth = -3
-TRIGRS(tr, i, hora, zonas, prefix='M', zmax=zmax, depth=depth, FOSM=False, export=False)
-#%% Amenaza
+# Amenaza
 tr = 100
-i = 114.6750106
+i = 221.6
 zonas = 3
-hora = 30
+hora = 26/60
 zmax = -3
 depth = -3
-os.chdir(r"G:\Unidades compartidas\Proyectos(Fede)\Tarso\Urbano\TRIGRS")
-TRIGRS(tr, i, hora, zonas, prefix='U', zmax=zmax, depth=depth, FOSM=True, export=True)
+
+TRIGRS(tr, i, hora, zonas, prefix='A', zmax=zmax, depth=depth, FOSM=True, export=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#%%
+# os.chdir(r"G:\Unidades compartidas\Proyectos(Fede)\Tarso\Urbano\TRIGRS")
+# trs = [2,233,5,10,25,50,100,300,500]
+# ints = [13.080,14.015,17.107,19.766,23.153,25.561,28.058,32.409,34.344]
+# zonas = 9
+# hora = 4
+# zmax = -3
+# depth = -3
+
+# #Valores medios
+# for i,tr in zip(ints,trs):
+#     TRIGRS(tr, i, hora, zonas, prefix='M', zmax=zmax, depth=depth, FOSM=False, export=False)
+
+#%%
+# os.chdir("./Mohan/Codigo/")
+# tr=2
+# i=13.080
+# zonas = 9
+# hora = 4
+# zmax = -3
+# depth = -3
+# TRIGRS(tr, i, hora, zonas, prefix='M', zmax=zmax, depth=depth, FOSM=False, export=False)
+
 
 #%%
 import rasterio
