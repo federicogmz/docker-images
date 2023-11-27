@@ -20,10 +20,10 @@ geoPath = '/home/geohazards/TRIGRS/Geologia.shp'
 outPath = '/home/geohazards/TRIGRS'
 demPath = f'{outPath}/DemResample.tif'
 
-# t = TRIGRS()
-# t(demPath, geoPath, outPath)
-s = SHALSTAB(demPath, geoPath, 96, shalstabPath=f'{outPath}/Shalstab.tif', exportShalstab=True)
-shalstab, criticalRain = s()
+t = TRIGRS()
+t(demPath, geoPath, outPath)
+# s = SHALSTAB(demPath, geoPath, 96, shalstabPath=f'{outPath}/Shalstab.tif', exportShalstab=True)
+# shalstab, criticalRain = s()
 
 #%%
 import subprocess
