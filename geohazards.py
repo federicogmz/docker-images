@@ -1,15 +1,18 @@
 import os
 import re
-from typing import Any
 import whitebox
 import rasterio
 import rioxarray
+import statistics
 import subprocess
 import numpy as np
+import pandas as pd
 import xarray as xr
 import richdem as rd
-from osgeo import gdal
 import geopandas as gpd
+from scipy import ndimage
+from matplotlib import colors
+from pysheds.grid import Grid
 from rasterio.plot import show
 import matplotlib.pyplot as plt
 from geocube.api.core import make_geocube
@@ -22,11 +25,30 @@ class geohazards():
         
         return
     
-    def preprocessDEM(self, demPath):
+    def preprocess_dem(self, dem_path):
 
-        return
+        print('--- Preprocessing DTM. ---')
+
+        with rasterio.open(dem_path) as src:
+            data = src.read(1, masked=True)
+            nodata_mask = data.mask
+
+            dilated_mask = ndimage.binary_dilation(nodata_mask)
+
+            data_filled = data.copy()
+            data_filled[nodata_mask] = np.mean(data[dilated_mask])
+
+            profile = src.profile
+            with rasterio.open(dem_path, 'w', **profile) as dst:
+                dst.write(data_filled, 1)
+
+        print('--- DTM successfully proccessed. ---')
+
+        dem = xr.open_dataarray(dem_path)
+
+        return dem
     
-    def resample(input, resolution, export=False, output=''):
+    def resample(self, input, resolution, export=False, output=''):
 
         inputRaster = rioxarray.open_rasterio(input)
 
@@ -66,19 +88,19 @@ class geohazards():
 
         print(f'Raster exported succesfully to {output}.')
 
-    def Catani(self, demPath, geoPath, hmin=0.1, hmax=3.0):
+    def Catani(self, dem_path, geo_path, hmin=0.1, hmax=3.0):
 
         """
         Function to get soil thickness from model S Catani et. al (2010)
         """
 
         #Imports dem and opens it with rasterio
-        dem = xr.open_dataarray(demPath, mask_and_scale=True)
-        dem_ = rd.LoadGDAL(demPath)
+        dem = xr.open_dataarray(dem_path, mask_and_scale=True)
+        dem_ = rd.LoadGDAL(dem_path)
         slope = rd.TerrainAttribute(dem_, attrib='slope_radians')
         slope_rad = xr.DataArray(slope, coords=[dem.coords['y'],dem.coords['x']])
 
-        gdf = gpd.read_file(geoPath)
+        gdf = gpd.read_file(geo_path)
 
         if isinstance(hmin, str):
             hmin = make_geocube(vector_data=gdf, measurements = [hmin], 
@@ -106,40 +128,40 @@ class geohazards():
         #Returns soil thickness rasterio file
         return catani
     
-    def Slope(self, demPath):
+    def Slope(self, dem_path):
 
-        dem = xr.open_dataarray(demPath, mask_and_scale=True)
+        dem = xr.open_dataarray(dem_path, mask_and_scale=True)
 
-        dem_ = rd.LoadGDAL(demPath)
+        dem_ = rd.LoadGDAL(dem_path)
         slope = rd.TerrainAttribute(dem_, attrib='slope_degrees')
 
         slope = xr.DataArray(slope, coords=[dem.coords['y'],dem.coords['x']])
 
         return slope
 
-    def flowDirection(self, demPath):
+    def flowdir(self, dem_path):
 
-        # Initialize the WhiteboxTools
-        wbt = whitebox.WhiteboxTools()
+        dem_xr = xr.open_dataarray(dem_path)
 
-        # Run the FlowPointerEpsilon tool to compute flow direction
-        wbt.d8_pointer(
-            demPath,
-            f'{os.path.dirname(demPath)}/flowdir.tif',
-            esri_pntr=True,
-            callback=self.non_verbose_callback
-        )
+        # Create a PySheds grid
+        grid = Grid.from_raster(dem_path)
+        dem = grid.read_raster(dem_path)
 
-        flowdir = xr.open_dataarray(f'{os.path.dirname(demPath)}/flowdir.tif')
-        flowdir = flowdir.where(flowdir!=0, 1)
-        os.remove(f'{os.path.dirname(demPath)}/flowdir.tif')
+        # Return the preprocessed DEM array
+        flow_direction = grid.flowdir(dem)
         
-        return flowdir
+        # Convert to xarray DataArray
+        flow_direction = xr.DataArray(flow_direction, coords=[dem_xr.coords['y'],dem_xr.coords['x']])
+
+        flow_direction = flow_direction.where(flow_direction>0, np.nan)
+
+        flow_direction.rio.set_crs(dem_xr.rio.crs, inplace=True)
+
+        return flow_direction
 
     def non_verbose_callback(self, progress):
         """ Function to make WhiteBoxTools non verbose"""
         pass
-
 
 class TRIGRS(geohazards):
 
@@ -147,85 +169,225 @@ class TRIGRS(geohazards):
 
         geohazards.__init__(self)
 
-    def __call__(self, demPath, geoPath, outPath):
+    def __call__(self, dem_path, geo_path, out_path, hora, cri, fosm=False):
 
-        self.dem, self.slope, self.zonas, self.zs, self.flowdir = self.Insumos(demPath, geoPath, outPath)
-        
-        error = self.GridMatch(self.rows, self.cols, outPath)
+        self.out_path = out_path
+
+        self.dem, self.slope, self.zonas, self.zs, self.fdir = self.Insumos(dem_path, geo_path)
+        self.zones = self.gdf['Zona'].max()
+
+        error = self.GridMatch(self.rows, self.cols)
 
         if not error:
-            n, imax, rows, cols, nwf = self.TopoIndex(self.rows, self.cols, outPath)
+            n, imax, rows, cols, nwf = self.TopoIndex(self.rows, self.cols)
 
-        # if n==0:
-        #     self.TRIGRS(outPath, imax, rows, cols, nwf)
+        if n==0:
+            if not os.path.exists(f'{self.out_path}/Resultados'):
+                os.makedirs(f'{self.out_path}/Resultados')
 
-    def Insumos(self, demPath, geoPath, outPath):
+            cohesion = self.gdf['Cohesion'].values
+            friccion = self.gdf['Friccion'].values
+            gamma = self.gdf['Gamma'].values
+            ks = self.gdf['Ks'].values
+
+            variation_C = 40 / 100
+            C_means = cohesion
+            C_vectors = {}
+            C_vars = {}
+            C_stds = {}
+            for i, C_mean in enumerate(C_means, start=1):
+                C_vectors[i] = [C_mean, C_mean + (C_mean * variation_C), C_mean - (C_mean * variation_C)]
+                C_vars[i] = np.var(C_vectors[i])
+                C_stds[i] = np.std(C_vectors[i])
+
+            variation_phi = 13 / 100
+            phi_means = friccion
+            phi_vectors = {}
+            phi_vars = {}
+            phi_stds = {}
+            for i, phi_mean in enumerate(phi_means, start=1):
+                phi_vectors[i] = [phi_mean, phi_mean + (phi_mean * variation_phi), phi_mean - (phi_mean * variation_phi)]
+                phi_vars[i] = np.var(phi_vectors[i])
+                phi_stds[i] = np.std(phi_vectors[i])
+            
+            variation_uws = 7 / 100
+            uws_means = gamma
+            uws_vectors = {}
+            uws_vars = {}
+            uws_stds = {}
+            for i, uws_mean in enumerate(uws_means, start=1):
+                uws_vectors[i] = [uws_mean, uws_mean + (uws_mean * variation_uws), uws_mean - (uws_mean * variation_uws)]
+                uws_vars[i] = np.var(uws_vectors[i])
+                uws_stds[i] = np.std(uws_vectors[i])
+            
+            variation_ks = 90 / 100
+            ks_means = ks
+            ks_vectors = {}
+            ks_vars = {}
+            ks_stds = {}
+            for i, ks_mean in enumerate(ks_means, start=1):
+                ks_vectors[i] = [ks_mean, ks_mean + (ks_mean * variation_ks), ks_mean - (ks_mean * variation_ks)]
+                ks_vars[i] = np.var(ks_vectors[i])
+                ks_stds[i] = np.std(ks_vectors[i])
+
+            # Corre para valores medios
+            print(f'Corriendo para valores medios.')
+            self.tr_in_creation(imax, rows, cols, nwf, hora, cri, C_means, phi_means, uws_means, ks_means, output_suffix='M')
+            self.TRIGRS_main()
+
+            def read_result(file_path):
+                data = np.genfromtxt(file_path, skip_header=6, delimiter=' ')
+                data = np.where(data == -9999, np.nan, data)
+                data = np.where(data >= 10, 10, data)
+                return data
+            
+            dem = rioxarray.open_rasterio(dem_path, mask_and_scale=True)
+            fs_mean = read_result(f'{out_path}/Resultados/TRfs_min_M_1.txt')
+            fs_mean = xr.DataArray(fs_mean, coords=[dem.coords['y'],dem.coords['x']])
+            fs_mean.rio.write_nodata(-9999, inplace=True)
+            fs_mean.rio.write_crs(dem.rio.crs, inplace=True)
+            fs_mean.rio.to_raster(f'{out_path}/Resultados/FS.tif')
+            
+            
+            if fosm:
+
+                print(f'Corriendo para valores modificados.')
+
+                parameters = {'C':C_means, 'P':phi_means, 'G':uws_means, 'K':ks_means}
+
+                for key in parameters.keys():
+                    params = parameters.copy()
+                    params[key] = [ float(i)*1.1 for i in params[key]]
+
+                    self.tr_in_creation(imax, rows, cols, nwf, hora, cri, *list(params.values()), output_suffix=key)
+                    self.TRIGRS_main()
+
+                def plot_percentage_variance(porc):
+                    ind = np.arange(4)
+                    porc.plot.bar(legend=False)
+                    plt.ylabel('Porcentaje de la varianza')
+                    plt.xticks(ind, ('Cohesión', 'Ángulo de\nfricción', 'Peso\nEspecífico', 'Ks'), rotation=0)
+                    plt.tight_layout()
+                    plt.show()
+
+                def plot_Ind_conf_hora(Ind_conf_hora):
+                    c_map = colors.ListedColormap(['red', 'yellow', 'green'])
+                    bounds = [0, 1.0, 2.5, 10]
+                    norm = colors.BoundaryNorm(bounds, c_map.N)
+                    plt.imshow(Ind_conf_hora, cmap=c_map, norm=norm)
+
+                # Reading results
+                FS_medio = read_result(f'{out_path}/Resultados/TRfs_min_M_1.txt')
+                FS_cohe = read_result(f'{out_path}/Resultados/TRfs_min_C_1.txt')
+                FS_phi = read_result(f'{out_path}/Resultados/TRfs_min_P_1.txt')
+                FS_uws = read_result(f'{out_path}/Resultados/TRfs_min_G_1.txt')
+                FS_ks = read_result(f'{out_path}/Resultados/TRfs_min_K_1.txt')
+
+                zonas = np.genfromtxt(f'{out_path}/zonas.asc', skip_header=6, delimiter=' ')
+                zonas = np.where(zonas == -9999, np.nan, zonas)
+
+                def dFS(FS, mean_list):
+                    for i in range(1, self.zones + 1):
+                        if i == 1:
+                            dFS = np.where(zonas == i, FS / (0.1 * mean_list[i - 1]), FS)
+                        else:
+                            dFS = np.where(zonas == i, FS / (0.1 * mean_list[i - 1]), dFS)
+                    return dFS
+
+                dFS_c = dFS(FS_cohe, C_means)
+                dFS_phi = dFS(FS_phi, phi_means)
+                dFS_uws = dFS(FS_uws, uws_means)
+                dFS_ks = dFS(FS_ks, ks_means)
+
+                def VF(dF, var_list):
+                    for i in range(1, self.zones + 1):
+                        if i == 1:
+                            vF = np.where(zonas == i, (dF ** (2)) * var_list[i], dF)
+                        else:
+                            vF = np.where(zonas == i, (dF ** (2)) * var_list[i], vF)
+                    return vF
+
+                vF_C = VF(dFS_c, C_vars)
+                vF_phi = VF(dFS_phi, phi_vars)
+                vF_uws = VF(dFS_uws, uws_vars)
+                vF_ks = VF(dFS_ks, ks_vars)
+
+                std_Fs = np.sqrt(vF_C + vF_phi + vF_uws + vF_ks)
+
+                vF = vF_C + vF_phi + vF_uws + vF_ks
+
+                Ind_conf = (FS_medio - 1) / std_Fs
+                Ind_conf = np.where(Ind_conf < 0, -9999, Ind_conf)
+                Ind_conf = np.where(Ind_conf == np.math.inf, 9999, Ind_conf)
+
+                porc = pd.DataFrame([np.nanmean(vF_C / vF), np.nanmean(vF_phi / vF),
+                                    np.nanmean(vF_uws / vF), np.nanmean(vF_ks / vF)])
+
+                plot_percentage_variance(porc)
+                plot_Ind_conf_hora(Ind_conf)
+
+                Ind_conf = xr.DataArray(Ind_conf, coords=[dem.coords['y'],dem.coords['x']])
+                Ind_conf.rio.write_nodata(-9999, inplace=True)
+                Ind_conf.rio.write_crs(dem.rio.crs, inplace=True)
+                Ind_conf.rio.to_raster(f'{out_path}/Resultados/Ind_Conf.tif')
+            
+        return
+
+    def Insumos(self, dem_path, geo_path):
 
         # DEM
-        dem = xr.open_dataarray(demPath, mask_and_scale=True)
-
-        print('Performing hydrological corrections on DEM: fill and breach depressions.')
-        
-        # Initialize the WhiteboxTools
-        wbt = whitebox.WhiteboxTools()
-        wbt.fill_depressions(
-            demPath,
-            f'{os.path.dirname(demPath)}/filldem.tif',
-            fix_flats=True,
-            flat_increment=0.1,
-            callback=self.non_verbose_callback
-        )
-        wbt.breach_depressions(
-            f'{os.path.dirname(demPath)}/filldem.tif',
-            f'{os.path.dirname(demPath)}/filldem.tif',
-            callback=self.non_verbose_callback
-        )
-        dem = xr.open_dataarray(f'{os.path.dirname(demPath)}/filldem.tif')
-        os.remove(f'{os.path.dirname(demPath)}/filldem.tif')
+        dem = xr.open_dataarray(dem_path)
+        fdir = self.flowdir(dem_path)
 
         # Pendiente
-        slope = self.Slope(demPath)
+        slope = self.Slope(dem_path)
 
         # Zonas
-        gdf = gpd.read_file(geoPath)
+        gdf = gpd.read_file(geo_path)
         gdf.geometry = gdf.geometry.map(lambda x: x.buffer(1).union(x))
-        gdf = gdf.explode().reset_index(drop=True)
+        gdf = gdf.explode(index_parts=True).reset_index(drop=True)
 
-        zonas = make_geocube(vector_data=gdf, measurements = ['Zona'], 
-                        like=dem, fill = np.nan)['Zona']
+        zonas = make_geocube(vector_data=gdf, measurements = ['Zona'], like=dem, fill = np.nan)['Zona']
 
         # Set the corresponding pixels in zs to NaN
-        zonas = zonas.where(~np.isnan(dem))
+        zonas = zonas.where(~np.isnan(fdir))
 
         # Espesor
-        zs = self.Catani(demPath, geoPath)
-
-        # Dirección de flujo
-        flowdir = self.flowDirection(demPath)
+        zs = self.Catani(dem_path, geo_path)
 
         dem = dem.where(~np.isnan(zonas))
         zs = zs.where(~np.isnan(zonas))
-        flowdir = flowdir.where(~np.isnan(zonas))
+        fdir = fdir.where(~np.isnan(zonas))
         slope = slope.where(~np.isnan(zonas))
 
-        if dem.isnull().sum().values == zs.isnull().sum().values == flowdir.isnull().sum().values == slope.isnull().sum().values == zonas.isnull().sum().values:
+        if dem.isnull().sum().values == zs.isnull().sum().values == fdir.isnull().sum().values == slope.isnull().sum().values == zonas.isnull().sum().values:
             print('\nNaN match in all rasters.\n')
             print('----- Exporting ASCII. -----')
 
-            self.exportASCII(dem, f'{outPath}/dem.asc')
-            self.exportASCII(slope, f'{outPath}/slope.asc')
-            self.exportASCII(zonas, f'{outPath}/zonas.asc', fmt='%d')
-            self.exportASCII(zs, f'{outPath}/zs.asc')
-            self.exportASCII(flowdir, f'{outPath}/flowdir.asc', fmt='%d')
+            self.exportASCII(dem, f'{self.out_path}/dem.asc')
+            self.exportASCII(slope, f'{self.out_path}/slope.asc')
+            self.exportASCII(zonas, f'{self.out_path}/zonas.asc', fmt='%d')
+            self.exportASCII(zs, f'{self.out_path}/zs.asc')
+            self.exportASCII(fdir, f'{self.out_path}/flowdir.asc', fmt='%d')
 
             print('----- ASCII exported succesfully. -----\n')
 
-        self.rows, self.cols = dem.sizes['y'], dem.sizes['x']
-        self.gdf = gdf
+            self.rows, self.cols = dem.sizes['y'], dem.sizes['x']
+            self.gdf = gdf
 
-        return dem, slope, zonas, zs, flowdir
+        else:
 
-    def GridMatch(self, rows, cols, outPath):
+            print(f'Dem NaN: {dem.isnull().sum().values}')
+            print(f'Slope NaN: {slope.isnull().sum().values}')
+            print(f'Zs NaN: {zs.isnull().sum().values}')
+            print(f'FlowDir NaN: {fdir.isnull().sum().values}')
+            print(f'Zonas NaN: {zonas.isnull().sum().values}')
+
+            raise Exception('ASCII do not exported. NaN do not match.')
+            
+        return dem, slope, zonas, zs, fdir
+
+    def GridMatch(self, rows, cols):
 
         # Create the content string with variables
         content = 'number of grid files to test\n'
@@ -241,21 +403,25 @@ class TRIGRS(geohazards):
         content += '*** Note, Flow-direction grids need additional processing beyond the capabilities of GridMatch.'
 
         # Write the content to the file
-        with open(f'{outPath}/gm_in.txt', 'w') as file:
+        with open(f'{self.out_path}/gm_in.txt', 'w') as file:
             file.write(content)
 
         print("GridMatch input created successfully.")
         print(f"----- Executing gridmatch.exe. -----")
 
-        os.chdir(outPath)
-        subprocess.run([f'{outPath}/gridmatch.exe'])
+        os.chdir(self.out_path)
+        subprocess.run([
+            f'{self.out_path}/gridmatch.exe'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
 
-        print(f"----- gridmatch.exe finished. -----\n")
+        print(f"----- gridmatch.exe finished. -----")
 
         # Results
         mismatches = {}
 
-        with open(f'{outPath}/GridMatchLog.txt', 'r') as file:
+        with open(f'{self.out_path}/GridMatchLog.txt', 'r') as file:
             lines = file.readlines()
 
         # Iterate over the grid results section and extract the grid names and number of mismatches
@@ -279,9 +445,9 @@ class TRIGRS(geohazards):
             
         return error
 
-    def TopoIndex(self, rows, cols, outPath):
+    def TopoIndex(self, rows, cols):
 
-        iterations = 500
+        iterations = 100
 
         # Create the content string with variables
         content = 'Name of project (up to 255 characters)\n'
@@ -310,22 +476,26 @@ class TRIGRS(geohazards):
         content += 'project\n'
 
         # Write the content to the file
-        with open(f'{outPath}/tpx_in.txt', 'w') as file:
+        with open(f'{self.out_path}/tpx_in.txt', 'w') as file:
             file.write(content)
 
         print("TopoIndex input created successfully.\n")
-        print(f"----- Executing TopoIndex.exe with {iterations} iterations. -----\n")
+        print(f"----- Executing TopoIndex.exe with {iterations} iterations. -----")
 
-        os.chdir(outPath)
-        if not os.path.exists(f'{outPath}/tpx'):
-            os.makedirs(f'{outPath}/tpx')
-        subprocess.run([f'{outPath}/TopoIndex.exe'])
+        os.chdir(self.out_path)
+        if not os.path.exists(f'{self.out_path}/tpx'):
+            os.makedirs(f'{self.out_path}/tpx')
+        subprocess.run(
+            [f'{self.out_path}/TopoIndex.exe'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
 
-        print(f"\n----- TopoIndex.exe finished. -----\n")
+        print(f"----- TopoIndex.exe finished. -----")
 
         # Results
 
-        with open(f'{outPath}/TopoIndexLog.txt', 'r') as file:
+        with open(f'{self.out_path}/TopoIndexLog.txt', 'r') as file:
             text = file.read()
 
             success = 'TopoIndex finished normally' in text
@@ -345,48 +515,47 @@ class TRIGRS(geohazards):
             
         return n, imax, rows, cols, nwf
 
-    def TRIGRS(self, outPath, imax, rows, cols, nwf):
+    def tr_in_creation(self, imax, rows, cols, nwf, hora, i, cohesion, friccion, gamma, ks, output_suffix):
 
+        # tr_in file creation
         # Define the variable values
-        project_name = 'project'
-        tx = 100
-        nmax = -10
+        tx = 1
+        nmax1 = 30
         nzs = 10
-        mmax = 200
+        mmax2 = 0
         nper = 1
-        zmin = 0.001
+        zmin = 0.01
         uww = 9.8e3
-        t = 28800
-        zones = self.gdf['Zona'].max()
+        t = hora * 3600
+        zones = self.zones
         zmax = depth = -3
-        rizero = 2.59e-07
+        rizero = 7.7e-08
         min_slope_angle = 0
+        cri = i / (1000 * 3600)  # Intensidad en m/s 
 
-        cohesion = [13000, 9000, 16000, 13000, 16000, 16000]
-        phi = [31, 35, 31, 31, 31, 31]
-        uws = [19800, 19800, 19100, 19800, 19100, 19100]
-        diffus = [2.68e-06, 5.00e-07, 2.47e-04, 2.68e-06, 2.47e-04, 2.47e-04]
-        k_sat = [2.68e-08, 5.00e-09, 2.47e-06, 2.68e-08, 2.47e-06, 2.47e-06]
-        theta_sat = [0.50, 0.45, 0.40, 0.51, 0.40, 0.40]
-        theta_res = [0.28, 0.22, 0.13, 0.27, 0.13, 0.13]
-        alpha = [4.54, 3.84, 3.88, 2.53, 3.88, 3.88]
+        cohesion = cohesion * 1000
+        phi = friccion
+        gamma = gamma * 1000
+        k_sat = ks
+        diffus = ks * 100
+        theta_sat = [-0.23] * zones
+        theta_res = [-0.48] * zones
+        alpha = [-0.06] * zones
 
-        cri = 6.28611e-06
-        capt = [0, 28800]
+        capt = [0, t]
 
-        slope_file = f'{outPath}/slope.asc'
-        zone_file = f'{outPath}/zonas.asc'
-        depth_file = f'{outPath}/zs.asc'
-        init_depth_file = f'{outPath}/zs.asc'
+        slope_file = f'{self.out_path}/slope.asc'
+        zone_file = f'{self.out_path}/zonas.asc'
+        depth_file = f'{self.out_path}/zs.asc'
+        init_depth_file = f'{self.out_path}/zs.asc'
         infil_rate_file = "none"
         rainfall_files = "none"
 
-        runoff_receptor_file = "tpx\\TIdscelGrid_Charras.txt"
-        runoff_order_file = "tpx\\TIcelindxList_Charras.txt"
-        runoff_cell_list_file = "tpx\\TIdscelList_Charras.txt"
-        runoff_weighting_file = "tpx\\TIwfactorList_Charras.txt"
+        runoff_receptor_file = "tpx\\TIdscelGrid_project.txt"
+        runoff_order_file = "tpx\\TIcelindxList_project.txt"
+        runoff_cell_list_file = "tpx\\TIdscelList_project.txt"
+        runoff_weighting_file = "tpx\\TIwfactorList_project.txt"
         output_folder = "Resultados\\"
-        output_suffix = "P"
 
         save_runoff_grid = False
         save_factor_of_safety_grid = True
@@ -396,7 +565,7 @@ class TRIGRS(geohazards):
         save_unsat_zone_flux_grid = False
         save_pressure_head_flag = 0
         num_output_times = 1
-        output_times = 28800
+        output_times = t
         skip_other_timesteps = False
         use_analytic_solution = True
         estimate_positive_pressure_head = True
@@ -407,20 +576,21 @@ class TRIGRS(geohazards):
 
         # Generate the text
         content = "Name of project (up to 255 characters)\n"
-        content += f"{project_name}\n"
+        content += "Project\n"
         content += "imax, row, col, nwf, tx, nmax\n"
-        content += f"{imax}, {rows}, {cols}, {nwf}, {tx}, {nmax}\n"
+        content += f"{imax}, {rows}, {cols}, {nwf}, {tx}, {nmax1}\n"
         content += "nzs, mmax, nper, zmin, uww, t, zones\n"
-        content += f"{nzs}, {mmax}, {nper}, {zmin}, {uww}, {t}, {zones}\n"
+        content += f"{nzs}, {mmax2}, {nper}, {zmin}, {uww}, {t}, {zones}\n"
         content += "zmax, depth, rizero, Min_Slope_Angle (degrees)\n"
         content += f"{zmax}, {depth}, {rizero}, {min_slope_angle}\n"
 
         for i in range(zones):
             content += f"zone,{i+1}\n"
             content += "cohesion,phi,uws,diffus,K-sat,Theta-sat,Theta-res,Alpha\n"
-            content += f"{cohesion[i]},{phi[i]},{uws[i]},{diffus[i]},{k_sat[i]},{theta_sat[i]},{theta_res[i]},{alpha[i]}\n"
+            content += f"{cohesion[i]},{phi[i]},{gamma[i]},{diffus[i]},{k_sat[i]},{theta_sat[i]},{theta_res[i]},{alpha[i]}\n"
 
-        content += f"cri(1), {cri}\n"
+        content += "cri(1), cri(2), ..., cri(nper)\n"
+        content += f"{cri}\n"
         content += "capt(1), capt(2), ..., capt(n), capt(n+1)\n"
         content += f"{','.join(map(str, capt))}\n"
         content += "File name of slope angle grid (slofil)\n"
@@ -464,7 +634,7 @@ class TRIGRS(geohazards):
         content += "Number of times to save output grids\n"
         content += f"{num_output_times}\n"
         content += "Times of output grids\n"
-        content += f"{','.join(map(str, output_times))}\n"
+        content += f"{output_times}\n"
         content += "Skip other timesteps? Enter T (.true.) or F (.false.)\n"
         content += f"{str(skip_other_timesteps)}\n"
         content += "Use analytic solution for fillable porosity? Enter T (.true.) or F (.false.)\n"
@@ -480,33 +650,53 @@ class TRIGRS(geohazards):
         content += "Add steady background flux to transient infiltration rate to prevent drying beyond the initial conditions during periods of zero infiltration?\n"
         content += f"{str(add_steady_background_flux)}\n"
 
+        # Write the content to the file
+        with open(f'{self.out_path}/tr_in.txt', 'w') as file:
+            file.write(content)
+
+        print("--- TRIGRS input created successfully. ---")
+
         return
+
+    def TRIGRS_main(self):
+
+        print(f"----- Executing TRIGRS.exe. -----")
+
+        subprocess.run(
+            [f'{self.out_path}/TRIGRS.exe'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        print(f"----- TRIGRS.exe finished. -----")
 
 class SHALSTAB(geohazards):
 
-    def __init__(self, demPath, geoPath, q, shalstabPath='', criticalRainPath='', exportShalstab=False, exportCriticalRain=False):
+    def __init__(self, dem_path, geo_path, geoColumns, q, zsPath='', shalstabPath='', criticalRainPath='', exportZs=False, exportShalstab=False, exportCriticalRain=False):
 
         geohazards.__init__(self)
 
         #Imports rasters and opens them with rasterio
-        dem = rioxarray.open_rasterio(demPath, mask_and_scale=True)
+        dem = rioxarray.open_rasterio(dem_path, mask_and_scale=True)
 
-        dem_ = rd.LoadGDAL(demPath)
+        dem_ = rd.LoadGDAL(dem_path)
         accum = rd.FlowAccumulation(dem_, method='D8')
         accum = xr.DataArray(accum, coords=[dem.coords['y'],dem.coords['x']])
 
-        gdf = gpd.read_file(geoPath)
+        gdf = gpd.read_file(geo_path)
+
+        cohesion, friccion, gamma, permeabilidad = geoColumns
 
         #Rasterize from geology
-        c = make_geocube(vector_data=gdf, measurements = ['C'], 
-                        like=dem, fill = np.nan)['C']
-        p = make_geocube(vector_data=gdf, measurements = ['Phi'], 
-                        like=dem, fill = np.nan)['Phi']
+        c = make_geocube(vector_data=gdf, measurements = [cohesion], 
+                        like=dem, fill = np.nan)[cohesion]
+        p = make_geocube(vector_data=gdf, measurements = [friccion], 
+                        like=dem, fill = np.nan)[friccion]
         p = np.radians(p)
-        g = make_geocube(vector_data=gdf, measurements = ['Gamma'], 
-                        like=dem, fill = np.nan)['Gamma']
-        k = make_geocube(vector_data=gdf, measurements = ['K'], 
-                        like = dem, fill = np.nan)['K']
+        g = make_geocube(vector_data=gdf, measurements = [gamma], 
+                        like=dem, fill = np.nan)[gamma]
+        k = make_geocube(vector_data=gdf, measurements = [permeabilidad], 
+                        like = dem, fill = np.nan)[permeabilidad]
 
         #Calculates slope
         slope = rd.TerrainAttribute(dem_, attrib='slope_radians')
@@ -514,7 +704,7 @@ class SHALSTAB(geohazards):
         slope_rad = slope.where(slope!=-9999.)
 
         #Calculates zs from Catani
-        zs = self.Catani(demPath, geoPath)
+        zs = self.Catani(dem_path, geo_path)
 
         #Unit weight of water
         gammaw = 9.81
@@ -542,23 +732,28 @@ class SHALSTAB(geohazards):
 
         shalstab = xr.DataArray(shalstab, coords=[dem.coords['y'],dem.coords['x']])
         shalstab.rio.write_nodata(-9999, inplace=True)
+        shalstab.rio.write_crs(dem.rio.crs, inplace=True)
 
         if exportShalstab:
             shalstab.rio.to_raster(shalstabPath)
+        if exportZs:
+            zs.rio.to_raster(zsPath)
 
         #Calculates critical rainfall
         criticalRain = 1000 * (k * zs * np.cos(slope_rad) * np.sin(slope_rad)) * (dem.rio.resolution()[0] / accum) * ((g / gammaw) * (1 - (np.tan(slope_rad) / np.tan(p))) + c / (gammaw * zs * np.cos(slope_rad)**2 * np.tan(p)))
         criticalRain = criticalRain.where(criticalRain>=0)
 
-        criticalRain = np.where(izq_un >= der_unstable, -2, 
-                       np.where(izq_un < der_stable, -1, criticalRain))
+        criticalRain = np.where(izq_un >= der_unstable, -2, # Unconditionally unstable
+                       np.where(izq_un < der_stable, -1, # Unconditionally stable
+                       criticalRain))
         criticalRain = xr.DataArray(criticalRain, coords=[dem.coords['y'],dem.coords['x']])
 
         criticalRain.rio.write_nodata(-9999, inplace=True)
 
         if exportCriticalRain:
             criticalRain.rio.to_raster(criticalRainPath)
-        
+
+        gdf = gpd.read_file(geo_path)
         totalCeldas = shalstab.to_series().sum()
 
         try: 
@@ -585,8 +780,7 @@ class SHALSTAB(geohazards):
 
         shalstab.attrs['Reporte'] = stabilityReport
 
-        print(stabilityReport)
-
+        self.zs = zs
         self.shalstab = shalstab
         self.criticalRain = criticalRain
 
@@ -596,64 +790,42 @@ class SHALSTAB(geohazards):
 
         return self.shalstab, self.criticalRain
 
-def FS(dem_path, geo_path, zw_path, c, phi, gammas, output='./FS.tif'):
+class FS(geohazards):
 
-    dem = rasterio.open(dem_path)
-    zw = rasterio.open(zw_path)
+    def __init__(self):
 
-    #Calculates slope
-    slope = calculate_slope(dem_path)
-    slope_array = slope.read(1)
+        geohazards.__init__(self)
 
-    #Sets no data to np.nan
-    slope_array[slope_array == slope.nodata] = np.nan
+    def __call__(self, dem_path, geo_path, zw_path, c, phi, gammas, output='./FS.tif'):
 
-    #Converts slope from degrees to radians
-    slope_rad = np.radians(slope_array)
+        dem = rasterio.open(dem_path)
+        zw = rasterio.open(zw_path)
 
-    gammaw = 9.81
+        #Calculates slope
+        slope = self.Slope(dem_path)
+        slope_array = slope.read(1)
 
-    C = rasterize(dem_path, geo_path, attribute=c).read(1)
-    phi = rasterize(dem_path, geo_path, attribute=phi).read(1)
-    gammas = rasterize(dem_path, geo_path, attribute=c).read(1)
+        #Sets no data to np.nan
+        slope_array[slope_array == slope.nodata] = np.nan
 
+        #Converts slope from degrees to radians
+        slope_rad = np.radians(slope_array)
 
-    FS = C + (gammas - gammaw) * zw * (np.cos(slope_rad)**2) * np.tan(phi) / gammas * zw * np.sin(slope_rad) * np.cos(slope_rad)
+        gammaw = 9.81
 
-    #Copies metadata from dem
-    meta = dem.meta.copy()
-    meta.update(compress='lzw', nodata=-9999)
+        C = make_geocube(vector_data=geo_path, measurements = [c], like=dem, fill = np.nan)[c]
+        phi = make_geocube(vector_data=geo_path, measurements = [phi], like=dem, fill = np.nan)[phi]
+        gammas = make_geocube(vector_data=geo_path, measurements = [gammas], like=dem, fill = np.nan)[gammas]
 
-    #Exports raster output file and assign metadata
-    with rasterio.open(output, 'w+', **meta) as out:
-        out.write_band(1, FS)
-    
-    #Returns soil thickness rasterio file
-    return rasterio.open(output)
+        FS = C + (gammas - gammaw) * zw * (np.cos(slope_rad)**2) * np.tan(phi) / gammas * zw * np.sin(slope_rad) * np.cos(slope_rad)
 
-def plot_rasterio(rio_dataset):
+        #Copies metadata from dem
+        meta = dem.meta.copy()
+        meta.update(compress='lzw', nodata=-9999)
 
-    """
-    Function to plot a rasterio raster with legend
-    """
-
-    #Creates plot
-    fig, ax = plt.subplots()
-
-    #Reads rasterio raster as np.array
-    array = rio_dataset.read(1)
-
-    #Sets no data to np.nan
-    array[array == rio_dataset.nodata] = np.nan
-
-    #Adds hidden plot for colorbar
-    image_hidden = ax.imshow(array)
-
-    #Adds the rasterio plot
-    show(rio_dataset, ax=ax)
-
-    #Adds the colorbar
-    fig.colorbar(image_hidden, ax=ax)
-
-    #Returns the plot
-    return plt.show()
+        #Exports raster output file and assign metadata
+        with rasterio.open(output, 'w+', **meta) as out:
+            out.write_band(1, FS)
+        
+        #Returns soil thickness rasterio file
+        return rasterio.open(output)

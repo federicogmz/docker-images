@@ -1,21 +1,25 @@
 #%%
-import pandas as pd
-from scipy import stats
 import numpy as np
-from scipy.stats import boxcox, skew, ttest_ind
-import matplotlib.pyplot as plt
-import ast
+import pandas as pd
 import seaborn as sns
+from scipy import stats
+import matplotlib.pyplot as plt
+from scipy.stats import boxcox, skew, ttest_ind
 from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.model_selection import RepeatedStratifiedKFold, GridSearchCV, train_test_split
 from sklearn.metrics import confusion_matrix, cohen_kappa_score, accuracy_score
+from sklearn.model_selection import RepeatedStratifiedKFold, GridSearchCV, train_test_split
 
 pd.options.display.float_format = '{:,.2f}'.format
 
+class POMCA():
+    def __init__():
+        return
+
 #%%
+main_path = '/mnt/c/Users/Fede/OneDrive - Universidad Nacional de Colombia/Work/2023/POMCA Bartolo/Susceptibilidad/'
 #Leer archivos
-df = pd.read_csv('/Volumes/GoogleDrive-111862222221066300789/Shared drives/Proyectos(Fede)/POMCA/Susceptibilidad/Insumos/df.csv')
+df = pd.read_csv(main_path + '')
 df = df.fillna(0)
 
 #%%

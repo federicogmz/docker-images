@@ -20,7 +20,7 @@ sns.scatterplot(x="A (sq. km)", y="Rh", hue="FFR", style="FFR",
                 markers={"nT": "o", "T": "X"},
                 data=df[df['FFR'].isin(['nT', 'T'])],
                 s=60, palette=["red", "blue"], alpha=0.8, ax=axes[0], legend=False)
-sns.scatterplot(x="A (sq. km)", y="Rh", data=df_cuencas,
+sns.scatterplot(x="Area", y="Rh", data=df_cuencas,
                 s=100, color='darkgreen', alpha=0.8, ax=axes[0], markers='.')
 axes[0].grid(alpha=.4)
 
