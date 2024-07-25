@@ -1,9 +1,7 @@
 import os
 import re
-import whitebox
 import rasterio
 import rioxarray
-import statistics
 import subprocess
 import numpy as np
 import pandas as pd
@@ -13,7 +11,6 @@ import geopandas as gpd
 from scipy import ndimage
 from matplotlib import colors
 from pysheds.grid import Grid
-from rasterio.plot import show
 import matplotlib.pyplot as plt
 from geocube.api.core import make_geocube
 
@@ -349,7 +346,6 @@ class TRIGRS(geohazards):
 
         zonas = make_geocube(vector_data=gdf, measurements = ['Zona'], like=dem, fill = np.nan)['Zona']
 
-        # Set the corresponding pixels in zs to NaN
         zonas = zonas.where(~np.isnan(fdir))
 
         # Espesor
@@ -670,125 +666,6 @@ class TRIGRS(geohazards):
 
         print(f"----- TRIGRS.exe finished. -----")
 
-class SHALSTAB(geohazards):
-
-    def __init__(self, dem_path, geo_path, geoColumns, q, zsPath='', shalstabPath='', criticalRainPath='', exportZs=False, exportShalstab=False, exportCriticalRain=False):
-
-        geohazards.__init__(self)
-
-        #Imports rasters and opens them with rasterio
-        dem = rioxarray.open_rasterio(dem_path, mask_and_scale=True)
-
-        dem_ = rd.LoadGDAL(dem_path)
-        accum = rd.FlowAccumulation(dem_, method='D8')
-        accum = xr.DataArray(accum, coords=[dem.coords['y'],dem.coords['x']])
-
-        gdf = gpd.read_file(geo_path)
-
-        cohesion, friccion, gamma, permeabilidad = geoColumns
-
-        #Rasterize from geology
-        c = make_geocube(vector_data=gdf, measurements = [cohesion], 
-                        like=dem, fill = np.nan)[cohesion]
-        p = make_geocube(vector_data=gdf, measurements = [friccion], 
-                        like=dem, fill = np.nan)[friccion]
-        p = np.radians(p)
-        g = make_geocube(vector_data=gdf, measurements = [gamma], 
-                        like=dem, fill = np.nan)[gamma]
-        k = make_geocube(vector_data=gdf, measurements = [permeabilidad], 
-                        like = dem, fill = np.nan)[permeabilidad]
-
-        #Calculates slope
-        slope = rd.TerrainAttribute(dem_, attrib='slope_radians')
-        slope = xr.DataArray(slope, coords=[dem.coords['y'],dem.coords['x']])
-        slope_rad = slope.where(slope!=-9999.)
-
-        #Calculates zs from Catani
-        zs = self.Catani(dem_path, geo_path)
-
-        #Unit weight of water
-        gammaw = 9.81
-
-        #Left from unconditional conditions
-        izq_un = np.tan(slope_rad)
-
-        #Right from unstable condition
-        der_unstable = np.tan(p) + (c / (g * zs * np.cos(slope_rad)**2))
-
-        #Right from stable condition
-        der_stable = (1 - (gammaw/g)) * np.tan(p) + (c / (g * zs * np.cos(slope_rad)**2))
-
-        #Left from main equation
-        izq = accum / dem.rio.resolution()[0]
-
-        #Right from main equation
-        der = ((k * (zs * np.cos(slope_rad)) * np.sin(slope_rad)) / (q/1000)) * ((g / gammaw) * (1 - np.tan(slope_rad) / np.tan(p)) + (c / (gammaw * zs * np.cos(slope_rad)**2 * np.tan(p)))) 
-
-        #Shalstab stability categories
-        shalstab = np.where(izq_un >= der_unstable, 2, # Unconditionally unstable
-                    np.where(izq_un < der_stable, 1, # Unconditionally stable
-                    np.where(izq > der, 3, # Unstable
-                    np.where(izq <= der, 4, np.nan)))) # Stable
-
-        shalstab = xr.DataArray(shalstab, coords=[dem.coords['y'],dem.coords['x']])
-        shalstab.rio.write_nodata(-9999, inplace=True)
-        shalstab.rio.write_crs(dem.rio.crs, inplace=True)
-
-        if exportShalstab:
-            shalstab.rio.to_raster(shalstabPath)
-        if exportZs:
-            zs.rio.to_raster(zsPath)
-
-        #Calculates critical rainfall
-        criticalRain = 1000 * (k * zs * np.cos(slope_rad) * np.sin(slope_rad)) * (dem.rio.resolution()[0] / accum) * ((g / gammaw) * (1 - (np.tan(slope_rad) / np.tan(p))) + c / (gammaw * zs * np.cos(slope_rad)**2 * np.tan(p)))
-        criticalRain = criticalRain.where(criticalRain>=0)
-
-        criticalRain = np.where(izq_un >= der_unstable, -2, # Unconditionally unstable
-                       np.where(izq_un < der_stable, -1, # Unconditionally stable
-                       criticalRain))
-        criticalRain = xr.DataArray(criticalRain, coords=[dem.coords['y'],dem.coords['x']])
-
-        criticalRain.rio.write_nodata(-9999, inplace=True)
-
-        if exportCriticalRain:
-            criticalRain.rio.to_raster(criticalRainPath)
-
-        gdf = gpd.read_file(geo_path)
-        totalCeldas = shalstab.to_series().sum()
-
-        try: 
-            incondEstables = shalstab.to_series().value_counts()[1]
-        except:
-            incondEstables = 0
-        try:
-            incondInestables = shalstab.to_series().value_counts()[2]
-        except:
-            incondInestables = 0
-        try:
-            inestables = shalstab.to_series().value_counts()[3]
-        except:
-            inestables = 0
-        try:
-            estables = shalstab.to_series().value_counts()[4]
-        except:
-            estables = 0
-
-        stabilityReport = f'Incondicionalmente estables: {incondEstables*100/totalCeldas:.2f}%\n'
-        stabilityReport += f'Incondicionalmente inestables: {incondInestables*100/totalCeldas:.2f}%\n'
-        stabilityReport += f'Inestables: {inestables*100/totalCeldas:.2f}%\n'
-        stabilityReport += f'Estables: {estables*100/totalCeldas:.2f}%'
-
-        shalstab.attrs['Reporte'] = stabilityReport
-
-        self.zs = zs
-        self.shalstab = shalstab
-        self.criticalRain = criticalRain
-
-        return 
-    
-    def __call__(self):
-
-        return self.shalstab, self.criticalRain
 
 class FS(geohazards):
 

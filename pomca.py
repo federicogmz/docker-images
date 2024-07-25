@@ -1,47 +1,242 @@
 #%%
+
+#########################
+### ESPESOR DEL SUELO ###
+#########################
+
+import richdem as rd
+import xarray as xr
 import numpy as np
+
+dem_path = '/home/fdgmz/Documents/san_bartolo/DEM.tif'
+hmin = 0.1
+hmax = 3.0
+
+dem = xr.open_dataarray(dem_path, mask_and_scale=True)
+dem_ = rd.LoadGDAL(dem_path)
+slope = rd.TerrainAttribute(dem_, attrib='slope_radians')
+slope_rad = xr.DataArray(slope, coords=[dem.coords['y'],dem.coords['x']])
+
+tan_slope = np.tan(slope_rad)
+tan_slope_max = np.tan(np.nanmax(slope_rad))
+tan_slope_min = np.tan(np.nanmin(slope_rad))
+
+catani = hmax * (1 - ( (tan_slope - tan_slope_min) / (tan_slope_max - tan_slope_min) ) * (1 - (hmin / hmax)) )
+
+catani = xr.DataArray(catani, coords=[dem.coords['y'], dem.coords['x']])
+
+catani = catani.where(~np.isnan(dem), np.nan).squeeze()
+
+catani.rio.to_raster('/home/fdgmz/Documents/san_bartolo/Susceptibilidad/catani.tif')
+
+
+#%%
+import rioxarray
+import numpy as np
+import xarray as xr
 import pandas as pd
 import seaborn as sns
 from scipy import stats
+import geopandas as gpd
 import matplotlib.pyplot as plt
+from geocube.api.core import make_geocube
+
 from scipy.stats import boxcox, skew, ttest_ind
-from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import confusion_matrix, cohen_kappa_score, accuracy_score
 from sklearn.model_selection import RepeatedStratifiedKFold, GridSearchCV, train_test_split
 
+class POMCA():
+
+    def __init__(self, dem_path:str, geo:gpd.GeoDataFrame):
+        """
+        Inicializa clase padre y crea variables base.
+
+        Args:
+            dem_path (str): Ruta al archivo de datos del modelo de elevación digital.
+            geo (gpd.GeoDataFrame): GeoDataFrame de las unidades geológicas.
+        """
+        self.figsize = (10, 8)
+        self.dem = rioxarray.open_rasterio(dem_path)
+
+        self.geo = geo.to_crs(self.dem.rio.crs)
+        self.extent = [self.geo.bounds.minx.values[0], self.geo.bounds.maxx.values[0],
+                    self.geo.bounds.miny.values[0], self.geo.bounds.maxy.values[0]]
+
+    def rasterize(self, gdf, column):
+
+        raster = make_geocube(vector_data=gdf, measurements = [column], like=self.dem, fill = np.nan)[column]
+        raster = raster.where(~np.isnan(self.dem))
+
+        return raster
+
+
+ruta_insumos = '/home/fdgmz/Documents/san_bartolo/Susceptibilidad/Insumos/'
+
+ruta_muestra = '/home/fdgmz/Documents/san_bartolo/Inventario/Muestra.shp'
+ruta_dem = ruta_insumos + 'dem.tif'
+ruta_ugs = '/home/fdgmz/Documents/san_bartolo/Ugs_preliminar.shp'
+
+ugs = gpd.read_file(ruta_ugs)
+
+#%%
+
+pomca = POMCA(ruta_dem, ugs)
+
+
+muestra_gdf = gpd.read_file(ruta_muestra)
+
+filtered_points = muestra_gdf[muestra_gdf['id'] == 1]
+
+variables_vector = [
+    'ugs', # UGS str
+    'gmf', # SUBUNIDAD float->int
+    'cobert', # NOMENCLAT float->int
+    'usos', # USO_ACT float->int
+    'geo', # NOMENCLAT str
+]
+
+rasterized_layers = {}
+gdf_dict = {}
+for var in variables_vector:
+    gdf = gpd.read_file(f"{ruta_insumos}{var}.shp")
+
+    joined = gpd.sjoin(filtered_points, gdf, how="inner", op="within")
+    
+    density = joined.groupby(joined.index_right).size() / gdf.area
+    
+    max_density = density.max()
+    gdf['weight'] = density / max_density
+
+    gdf['weight'] = gdf['weight'].fillna(0)
+
+    rasterized = pomca.rasterize(gdf, 'weight')
+    rasterized_layers[var] = rasterized
+    gdf_dict[var] = gdf
+
+variables_raster = [
+    'dem', 
+    'pend', 
+    'pends', 
+    'rugos',
+    'curvar',
+    'orient', 
+    'insol', 
+    'acuenca', 
+    'long',
+    'distvias', 
+    'distdren', 
+    'densdren', 
+    'distfalla',
+    'densfract', 
+    'espesor', 
+]
+
+rasters = {}
+for var in variables_raster:
+    rasters[var] = rioxarray.open_rasterio(f"{ruta_insumos}{var}.tif")
+
+rasters.update(rasterized_layers)
+ 
+muestra_gdf = gpd.read_file(ruta_muestra)
+muestra_gdf = muestra_gdf.explode(index_parts=False).reset_index(drop=True)
+
+sampled_data = []
+for index, point in muestra_gdf.iterrows():
+    point_data = {'id': point['id']}
+    for var, raster in rasters.items():
+        coords = [(point['geometry'].x, point['geometry'].y)]
+        sample_value = raster.sel(x=coords[0][0], y=coords[0][1], method="nearest").values
+        point_data[var] = sample_value[0] if sample_value.size > 0 else np.nan
+    sampled_data.append(point_data)
+
+df = pd.DataFrame(sampled_data)
+
+df.where(df!=-3.4028234663852886e+38, np.nan, inplace=True)
+df.where(df!=4294967295, np.nan, inplace=True)
+df.where(df!=-999999.0, np.nan, inplace=True)
+df.where(df!=-99999.0, np.nan, inplace=True)
+df.where(df!=-9999.0, np.nan, inplace=True)
+
+df['long'] = df['long'][df['long']>0]
+df['densfract'] = df['densfract'][df['densfract']>0]
+
+for column in df.columns:
+    if column not in ['id']:
+        col_min = df[column].min()
+        col_max = df[column].max()
+        col_mean = df[column].mean()
+        df[column] = (df[column] - col_min) / (col_max - col_min)
+        non_zero_min = df[column][df[column] != 0].min()
+        df.loc[df[column]<non_zero_min, column] = non_zero_min
+        df[column] = df[column].fillna(non_zero_min)
+
+# for column in df.columns:
+#     if column not in ['id']:
+#         col_min = df[column].min()
+#         col_max = df[column].max()
+#         col_mean = df[column].mean()
+#         print(f"Columna: {column}, Min: {col_min}, Max: {col_max}, Media: {col_mean}")
+
+
+#%%
+
+import numpy as np
+import xarray as xr
+import rioxarray
+import matplotlib.pyplot as plt
+
+# Define la función para limpiar y normalizar los datos del raster
+def clean_and_normalize_raster(raster, column_name):
+    raster = raster.where(raster != -3.4028234663852886e+38, np.nan)
+    raster = raster.where(raster != 4294967295, np.nan)
+    raster = raster.where(raster != -999999.0, np.nan)
+    raster = raster.where(raster != -99999.0, np.nan)
+    raster = raster.where(raster != -9999.0, np.nan)
+
+    # Condiciones específicas para 'long' y 'densfract'
+    if column_name == 'long':
+        raster = raster.where(raster > 0, np.nan)
+    elif column_name == 'densfract':
+        raster = raster.where(raster > 0, np.nan)
+    
+    # Normalización entre 0 y 1
+    col_min = raster.min().values
+    col_max = raster.max().values
+    raster = (raster - col_min) / (col_max - col_min)
+    
+    non_zero_min = raster.where(raster != 0).min().values
+    raster = raster.where(raster >= non_zero_min, non_zero_min)
+    raster = raster.fillna(non_zero_min)
+    
+    return raster
+
+# Transformar y exportar todos los rasters
+for var in list(rasters.keys())[18:]:
+    print(var)
+    # Limpiar y normalizar el raster
+    cleaned_raster = clean_and_normalize_raster(rasters[var], var)
+    
+    # Asegurarse de que las dimensiones están en el orden esperado antes de guardar
+    cleaned_raster = cleaned_raster.transpose('band', 'y', 'x')
+    
+    # Guardar el raster
+    cleaned_raster.rio.to_raster(f"{ruta_insumos}{var}_norm.tif")
+
+
+
+
+
+
+#%%
+
+
 pd.options.display.float_format = '{:,.2f}'.format
 
-class POMCA():
-    def __init__():
-        return
 
 #%%
-main_path = '/mnt/c/Users/Fede/OneDrive - Universidad Nacional de Colombia/Work/2023/POMCA Bartolo/Susceptibilidad/'
-#Leer archivos
-df = pd.read_csv(main_path + '')
-df = df.fillna(0)
-
-#%%
-#Renombrar columnas
-df.columns = ['id', 'DEM', 'PEND', 'PENDS', 'RUGOS',
-       'CURVAR', 'ORIENT', 'INSOL', 'ACUENCA', 'LONG',
-       'DISTVIAS', 'DISTDREN', 'DENSDREN', 'DISTFALLA', 'UGS', 'GMF',
-       'COBERT', 'ESPESOR', 'USOS', 'GEO', 'DENSFRACT']
-df = df[['id', 'DEM', 'PEND', 'PENDS', 'RUGOS',
-       'CURVAR', 'ORIENT', 'INSOL', 'ACUENCA', 'LONG',
-       'DISTVIAS', 'DISTDREN', 'DENSDREN', 'DISTFALLA', 'DENSFRACT', 
-       'UGS', 'GMF', 'COBERT', 'ESPESOR', 'USOS', 'GEO']]
-
-#%%
-#Normalizar variables
-
-df.iloc[:, 1:] = StandardScaler().fit_transform(df.iloc[:, 1:])
-df.iloc[:, 1:] = df.iloc[:, 1:] + np.abs(df.iloc[:, 1:].min()) + 1
-
-#%%
-#Histogramas
-folder = '/Volumes/GoogleDrive-111862222221066300789/Shared drives/Proyectos(Fede)/POMCA/Susceptibilidad/Figuras/Hist'
+# Histogramas
+folder = '/home/fdgmz/Documents/san_bartolo/Susceptibilidad/Figuras'
 for col in df.iloc[:,1:].columns:
 
     data = df[col]
@@ -51,44 +246,74 @@ for col in df.iloc[:,1:].columns:
 
 #%%Test de normalidad
 
+import pandas as pd
+from scipy import stats
+from scipy.stats import skew, boxcox
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 normalidad = []
 
-for col in df.iloc[:,1:].columns:
-    
-    data = df[col]
-   
-    pvalue = stats.kstest(data, 'norm').pvalue
+for col in df.iloc[:, 1:].columns:
+    data = df[col].dropna()  # Asegúrate de eliminar los NaN antes de las pruebas
 
-    # if pvalue > 0.05: print(f'{col} es normal: p-value={pvalue:.2f}')
-    # else: print(f'{col} no es normal: p-value={pvalue:.2f}')
+    args = stats.norm.fit(data)
+    pvalue = stats.kstest(data, 'norm', args=args).pvalue
+
+    if pvalue > 0.05:
+        print(f'{col} es normal: p-value={pvalue:.2f}')
+    else:
+        print(f'{col} no es normal: p-value={pvalue:.2f}')
+
     if skew(data) > 0.1:
         sesgo = 'positivo'
         transformada = 'lognormal'
-        #print(f'{col} tiene sesgo positivo.Se transforma a través de lognormal')
-        data = boxcox(data, 0)
-        nuevo_p = stats.kstest(data, 'norm').pvalue
-        #if pvalue > 0.01: print(f'{col} transformada es normal: p-value={pvalue:.2f}')
-        #else: print(f'{col} transformada no es normal: p-value={pvalue:.2f}')
-        #sns.displot(data, kde=True, bins=40)
-        #plt.title=f'Datos no transformados {col}'
-    elif skew(data) < 0.1:
+        print(f'{col} tiene sesgo positivo. Se transforma a través de lognormal')
+        data_transformed, _ = boxcox(data)
+        nuevo_p = stats.kstest(data_transformed, 'norm').pvalue
+
+        if nuevo_p > 0.05:
+            print(f'{col} transformada es normal: p-value={nuevo_p:.2f}')
+        else:
+            print(f'{col} transformada no es normal: p-value={nuevo_p:.2f}')
+        
+        sns.displot(data, kde=True, bins=40)
+        plt.title(f'Datos no transformados {col}')
+        plt.show()
+        
+        sns.displot(data_transformed, kde=True, bins=40)
+        plt.title(f'Datos transformados (lognormal) {col}')
+        plt.show()
+
+    elif skew(data) < -0.1:
         sesgo = 'negativo'
         transformada = 'cubo'
-        #print(f'{col} tiene sesgo negativo.')
-        #print('Se transforma a través del cubo')
-        data = data ** 3
-        nuevo_p = stats.kstest(data, 'norm').pvalue
-        #if pvalue > 0.01: print(f'{col} transformada es normal: p-value={pvalue:.2f}')
-        #else: print(f'{col} transformada no es normal: p-value={pvalue:.2f}')
-        #sns.displot(data, kde=True, bins=40)
-        #plt.title=f'Datos no transformados {col}'
-    #plt.show()
-    else: sesgo = 'normal'
+        print(f'{col} tiene sesgo negativo. Se transforma a través del cubo')
+        data_transformed = data ** 3
+        nuevo_p = stats.kstest(data_transformed, 'norm').pvalue
+        
+        if nuevo_p > 0.05:
+            print(f'{col} transformada es normal: p-value={nuevo_p:.2f}')
+        else:
+            print(f'{col} transformada no es normal: p-value={nuevo_p:.2f}')
+        
+        sns.displot(data, kde=True, bins=40)
+        plt.title(f'Datos no transformados {col}')
+        plt.show()
+        
+        sns.displot(data_transformed, kde=True, bins=40)
+        plt.title(f'Datos transformados (cubo) {col}')
+        plt.show()
+    else:
+        sesgo = 'normal'
+        transformada = np.nan
+        nuevo_p = np.nan
     
-    normalidad.append([col,pvalue,sesgo,transformada,nuevo_p])
+    normalidad.append([col, pvalue, sesgo, transformada, nuevo_p])
 
-normalidad = pd.DataFrame(normalidad, columns=['Variable','p-value','Sesgo','Transformada','p-value'])
-normalidad
+normalidad_df = pd.DataFrame(normalidad, columns=['Variable', 'p-value', 'Sesgo', 'Transformada', 'nuevo p-value'])
+print(normalidad_df)
+
 
 #%%
 #Matriz de correlación
@@ -112,13 +337,14 @@ ax = sns.heatmap(
     corr, 
     vmin = -1, vmax = 1, center = 0,
     cmap = sns.diverging_palette(20, 220, n=200, sep=180),
-    square = True);
+    square = True)
 
 ax.set_xticklabels(
     ax.get_xticklabels(),
-    rotation=90);
+    rotation=90)
 
-print('Dan con alta correlación positiva UGS-Espesor y DensFract-Geo\nDan con alta correlación negativa Insol-Pend')
+plt.savefig(f'{folder}/correlacion.png')
+# print('Dan con alta correlación positiva UGS-Espesor y DensFract-Geo\nDan con alta correlación negativa Insol-Pend')
 #%%
 #T-Test
 
@@ -128,11 +354,11 @@ for col in df.iloc[:,1:].columns:
     std_in = np.std(df[col][df['id']==1])
     media_es = np.mean(df[col][df['id']==0])
     std_es = np.std(df[col][df['id']==0])
-    #print(f'{col}\nInestables: media:{media_in}, std:{std_in}')
-    #print(f'{col}\nEstables: media:{media_es}, std:{std_es}')
+    print(f'{col}\nInestables: media:{media_in}, std:{std_in}')
+    print(f'{col}\nEstables: media:{media_es}, std:{std_es}')
     pvalue = ttest_ind(df[col][df['id']==1], df[col][df['id']==0]).pvalue
-    #if pvalue > 0.05: print(f'Los grupos de {col} son iguales: p-value={pvalue:.2f}')
-    #else: print(f'Los grupos de {col} son diferentes: p-value={pvalue:.2f}')
+    if pvalue > 0.05: print(f'Los grupos de {col} son iguales: p-value={pvalue:.2f}')
+    else: print(f'Los grupos de {col} son diferentes: p-value={pvalue:.2f}')
     contraste.append([col,media_es,std_es,media_in,std_in,pvalue])
 
 contraste = pd.DataFrame(contraste, columns=['Variable','Media ES','Std ES','Media IN','Std IN','p-value'])
@@ -195,78 +421,65 @@ def LDA(df):
 #Todas las variables
 model = LDA(df)
 
-#%% C2
-#Sacando INSOL por correlación con pendiente
-df_ = df.drop(columns=['INSOL'])
-model = LDA(df_)
+# #%% C2
+# #Sacando INSOL por correlación con pendiente
+# df_ = df.drop(columns=['INSOL'])
+# model = LDA(df_)
 
-#%% C3
-#Sacando INSOL por correlación con pendiente y ESPESOR Y DENSFRACT por alta correlación y ser derivadas de UGS y GEO
-df__ = df.drop(columns=['INSOL','ESPESOR','DENSFRACT'])
-model = LDA(df__)
+# #%% C3
+# #Sacando INSOL por correlación con pendiente y ESPESOR Y DENSFRACT por alta correlación y ser derivadas de UGS y GEO
+# df__ = df.drop(columns=['INSOL','ESPESOR','DENSFRACT'])
+# model = LDA(df__)
 
-#%% C4
-#Variables con medias estadísticamente diferentes y y ESPESOR Y DENSFRACT por alta correlación y ser derivadas de UGS y GEO
-df___ = df.drop(columns=['DEM','RUGOS','CURVAR','ORIENT','INSOL',
-                    'ACUENCA','LONG','DISTDREN','ESPESOR','DENSFRACT'])
-model = LDA(df___)
+# #%% C4
+# #Variables con medias estadísticamente diferentes y y ESPESOR Y DENSFRACT por alta correlación y ser derivadas de UGS y GEO
+# df___ = df.drop(columns=['DEM','RUGOS','CURVAR','ORIENT','INSOL',
+#                     'ACUENCA','LONG','DISTDREN','ESPESOR','DENSFRACT'])
+# model = LDA(df___)
 
-#%%
+# #%%
 
 
-#%%
-#Encuentra todas las combinaciones posibles y analiza LDA
-def LDA(df):
-    X_train, X_test, y_train, y_test = train_test_split(df.iloc[:,1:], df.iloc[:,0:1], test_size=0.2, random_state=1)
-    model = LinearDiscriminantAnalysis(solver='svd').fit(X_train, y_train)
-    acctrain = accuracy_score(y_train, model.predict(X_train))
-    acctest = accuracy_score(y_test, model.predict(X_test))
+# #%%
+# #Encuentra todas las combinaciones posibles y analiza LDA
+# def LDA(df):
+#     X_train, X_test, y_train, y_test = train_test_split(df.iloc[:,1:], df.iloc[:,0:1], test_size=0.2, random_state=1)
+#     model = LinearDiscriminantAnalysis(solver='svd').fit(X_train, y_train)
+#     acctrain = accuracy_score(y_train, model.predict(X_train))
+#     acctest = accuracy_score(y_test, model.predict(X_test))
     
-    return model, acctrain, acctest
+#     return model, acctrain, acctest
 
-from itertools import combinations
+# from itertools import combinations
 
-sample_list = df.columns[1:]
-list_combinations = list()
-for n in range(2, len(sample_list) + 1):
-    list_combinations += list(combinations(sample_list, n))
+# sample_list = df.columns[1:]
+# list_combinations = list()
+# for n in range(2, len(sample_list) + 1):
+#     list_combinations += list(combinations(sample_list, n))
 
-combinaciones = []
-for i in list_combinations:
-    df_ = df[['id']+list(i)]
-    model, acctrain, acctest = LDA(df_)
-    combinaciones.append([i, acctrain, acctest])
-    progreso = len(combinaciones)*100/len(list_combinations)
-    if progreso % 5 == 0:
-        print(f'Progreso: {progreso}%')
+# # combinaciones = []
+# # for i in list_combinations:
+# #     df_ = df[['id']+list(i)]
+# #     model, acctrain, acctest = LDA(df_)
+# #     combinaciones.append([i, acctrain, acctest])
+# #     progreso = len(combinaciones)*100/len(list_combinations)
+# #     if progreso % 5 == 0:
+# #         print(f'Progreso: {progreso}%')
 
-#%%
-combs = pd.DataFrame(combinaciones, columns=['Variables', 'acctrain', 'acctest'])
-combs.to_pickle('FuncDiscr.pkl')
+# #%%
+# combs = pd.DataFrame(combinaciones, columns=['Variables', 'acctrain', 'acctest'])
 
-#%%
-#Mejores combinaciones
-combs = pd.read_pickle('FuncDiscr.pkl')
 
-#%%
-combs[combs['acctrain']==combs['acctrain'].max()]
-#%%
-combs[combs['acctest']==combs['acctest'].max()]
-#%%
-combs[['acctrain','acctest']].mean(axis=1).sort_values()
+# #%%
+# combs[combs['acctrain']==combs['acctrain'].max()]
+# #%%
+# combs[combs['acctest']==combs['acctest'].max()]
+# #%%
+# combs[['acctrain','acctest']].mean(axis=1).sort_values()
 
-#%% C5
-model = LDA(df[['id']+list(combs.loc[1001190,'Variables'])])
-#%% C6
-model = LDA(df[['id']+list(combs.loc[568622,'Variables'])])
-#%% C7
-model = LDA(df[['id']+list(combs.loc[378366,'Variables'])])
-#%% C8
-model = LDA(df[['id']+list(combs.loc[991939,'Variables'])])
-
-#%% C9
-model = LDA(# %%
-df[['id']+list(combs.loc[378366,'Variables'])].drop(columns=['ORIENT','INSOL','DISTDREN']))
+# #%% C9
+# model = LDA(# %%
+# df[['id']+list(combs.loc[378366,'Variables'])].drop(columns=['ORIENT','INSOL','DISTDREN']))
 
 #%%
 # Modelo elegido y construcción de la ecuación
@@ -275,57 +488,6 @@ eq = ''
 for feat,coef in zip(model.feature_names_in_,model.coef_.flatten()):
     if coef < 0: signo = ''
     else: signo = '+'
-    eq += f'{signo}{coef:.2f}*{feat} '
+    eq += f'{signo}{coef:.2f}*"{feat}_norm@1" '
 eq
 
-#%%
-#Construcción de mapa de susceptibilidad
-import rasterio as rio
-import rasterio.mask
-import numpy as np
-import fiona
-from osgeo import gdal
-#%%
-
-ruta = '/Volumes/GoogleDrive-111862222221066300789/Shared drives/Proyectos(Fede)/POMCA/Susceptibilidad/Insumos/'
-
-#%% Cortar todos los raster con el límite de cuenca
-for raster in ['Slope.tif','Aspecto.tif','Insolacion.tif','DistDren.tif',
-                'DensDren.tif','DistFalla.tif','gmf.tif','coberturas.tif','usos.tif']:
-    gdal.Warp(srcDSOrSrcDSTab=ruta + raster,
-                destNameOrDestDS='/Volumes/GoogleDrive-111862222221066300789/Shared drives/Proyectos(Fede)/POMCA/Susceptibilidad/Final/'+raster,
-                cutlineDSName=ruta +'Limite_cuenca_real.shp',
-                cropToCutline=True)
-#%%
-ruta = '/Volumes/GoogleDrive-111862222221066300789/Shared drives/Proyectos(Fede)/POMCA/Susceptibilidad/Final/'
-
-def read(path):
-    raster = rasterio.open(ruta+path).read(1)
-    raster = np.where(raster==np.nan,0,raster)
-    raster = np.where(raster==raster[0,0],0,raster)
-    raster = (raster - np.nanmean(raster)) / np.nanstd(raster)
-    raster = raster + np.abs(np.nanmin(raster)) + 1
-    return raster
-
-#%%
-pend = read('Slope.tif')
-orient = read('Aspecto.tif')
-insol = read('Insolacion.tif')
-distdren = read('DistDren.tif')
-densdren = read('DensDren.tif')
-distfalla = read('DistFalla.tif')
-gmf = read('gmf.tif')
-cobert = read('coberturas.tif')
-usos = read('usos.tif')
-
-#%%
-
-suscept = 0.29*pend +0.06*orient +0.25*insol -0.19*distdren +0.04*densdren -0.22*distfalla +0.39*gmf -0.16*cobert +0.67*usos
-suscept = np.where(suscept==suscept[0,0],np.nan,suscept)
-
-meta = rasterio.open(ruta+'Slope.tif').meta.copy()
-meta.update(compress='lzw', nodata=0)
-
-#Exports raster output file and assign metadata
-with rasterio.open(ruta+'Suscept.tif', 'w+', **meta) as out:
-    out.write_band(1, suscept)
